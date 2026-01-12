@@ -264,7 +264,7 @@ class PgVectorStore @JvmOverloads constructor(
                 parentId = doc.metadata["parent_id"]?.toString() ?: "",
                 metadata = doc.metadata.mapValues { it.value }
             )
-            SimpleSimilarityResult(
+            SimilarityResult(
                 match = chunk,
                 score = doc.score?.toDouble() ?: 0.0
             )
@@ -293,7 +293,7 @@ class PgVectorStore @JvmOverloads constructor(
             { rs, _ ->
                 val chunk = mapToChunk(rs)
                 val score = rs.getDouble("score")
-                SimpleSimilarityResult(chunk, score)
+                SimilarityResult(chunk, score)
             },
             tsQuery,
             tsQuery,
@@ -459,10 +459,3 @@ data class GenericContentElement(
     override fun labels(): Set<String> = labels + setOf("ContentElement")
 }
 
-/**
- * Simple implementation of SimilarityResult.
- */
-data class SimpleSimilarityResult<T>(
-    override val match: T,
-    override val score: Double
-) : SimilarityResult<T>
