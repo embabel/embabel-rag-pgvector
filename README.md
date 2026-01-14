@@ -54,10 +54,10 @@ embabel.rag.pgvector:
 ```java
 PgVectorStore store = PgVectorStore.builder()
     .withDataSource(dataSource)
-    .withVectorStore(vectorStore)
     .withEmbeddingService(embeddingService)
     .withName("my-rag-store")
-    .withHybridWeights(0.7, 0.3)  // 70% vector, 30% FTS
+    .withEmbeddingDimension(1536)  // OpenAI ada-002
+    .withHybridWeights(0.7, 0.3)   // 70% vector, 30% FTS
     .withFuzzyThreshold(0.2)
     .build();
 
@@ -73,9 +73,9 @@ List<SimilarityResult<Chunk>> results = store.hybridSearch(
 ```kotlin
 val store = PgVectorStore.builder()
     .withDataSource(dataSource)
-    .withVectorStore(vectorStore)
     .withEmbeddingService(embeddingService)
     .withName("my-rag-store")
+    .withEmbeddingDimension(1536)
     .withHybridWeights(0.7, 0.3)
     .build()
 
@@ -162,6 +162,7 @@ ORDER BY score DESC
 | `embabel.rag.pgvector.name` | `pgvector-store` | Store instance name |
 | `embabel.rag.pgvector.content-element-table` | `content_elements` | Table name for content |
 | `embabel.rag.pgvector.schema-name` | `public` | PostgreSQL schema |
+| `embabel.rag.pgvector.embedding-dimension` | `1536` | Embedding vector dimension |
 | `embabel.rag.pgvector.vector-weight` | `0.7` | Weight for vector similarity (0.0-1.0) |
 | `embabel.rag.pgvector.fts-weight` | `0.3` | Weight for full-text search (0.0-1.0) |
 | `embabel.rag.pgvector.fuzzy-threshold` | `0.2` | Minimum trigram similarity (0.0-1.0) |

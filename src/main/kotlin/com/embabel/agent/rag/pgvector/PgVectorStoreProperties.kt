@@ -23,6 +23,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * @property name Name of this store instance
  * @property contentElementTable Name of the table for storing content elements
  * @property schemaName PostgreSQL schema name (defaults to public)
+ * @property embeddingDimension Dimension of embedding vectors (default 1536 for OpenAI ada-002)
  * @property vectorWeight Weight for vector similarity score in hybrid search (0.0-1.0)
  * @property ftsWeight Weight for full-text search score in hybrid search (0.0-1.0)
  * @property fuzzyThreshold Minimum trigram similarity threshold for fuzzy fallback (0.0-1.0)
@@ -32,6 +33,7 @@ data class PgVectorStoreProperties(
     val name: String = "pgvector-store",
     val contentElementTable: String = "content_elements",
     val schemaName: String = "public",
+    val embeddingDimension: Int = 1536,
     val vectorWeight: Double = 0.7,
     val ftsWeight: Double = 0.3,
     val fuzzyThreshold: Double = 0.2

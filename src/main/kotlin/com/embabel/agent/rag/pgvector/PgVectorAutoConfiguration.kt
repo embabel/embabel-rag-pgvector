@@ -19,10 +19,8 @@ import com.embabel.agent.rag.ingestion.ChunkTransformer
 import com.embabel.agent.rag.ingestion.ContentChunker
 import com.embabel.agent.rag.ingestion.RetrievableEnhancer
 import com.embabel.common.ai.model.EmbeddingService
-import org.springframework.ai.vectorstore.VectorStore
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
@@ -33,12 +31,10 @@ import javax.sql.DataSource
  * Auto-configuration for [PgVectorStore].
  *
  * This configuration is activated when:
- * - Spring AI's VectorStore is on the classpath
- * - A VectorStore bean is available
  * - A DataSource bean is available
+ * - JdbcClient can be created from the DataSource
  */
 @AutoConfiguration
-@ConditionalOnClass(VectorStore::class)
 @EnableConfigurationProperties(PgVectorStoreProperties::class)
 class PgVectorAutoConfiguration {
 
@@ -51,24 +47,22 @@ class PgVectorAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnBean(VectorStore::class, JdbcClient::class)
+    @ConditionalOnBean(JdbcClient::class)
     fun pgVectorStore(
-        vectorStore: VectorStore,
         jdbcClient: JdbcClient,
         properties: PgVectorStoreProperties,
-        chunkerConfig: ContentChunker.Config,
-        chunkTransformer: ChunkTransformer,
+        chunkerConfig: ContentChunker.Config?,
+        chunkTransformer: ChunkTransformer?,
         embeddingService: EmbeddingService?,
-        enhancers: List<RetrievableEnhancer>
+        enhancers: List<RetrievableEnhancer>?
     ): PgVectorStore {
         return PgVectorStore(
-            vectorStore = vectorStore,
             jdbcClient = jdbcClient,
             properties = properties,
-            chunkerConfig = chunkerConfig,
-            chunkTransformer = chunkTransformer,
+            chunkerConfig = chunkerConfig ?: ContentChunker.Config(),
+            chunkTransformer = chunkTransformer ?: ChunkTransformer.NO_OP,
             embeddingService = embeddingService,
-            enhancers = enhancers
+            enhancers = enhancers ?: emptyList()
         )
     }
 }

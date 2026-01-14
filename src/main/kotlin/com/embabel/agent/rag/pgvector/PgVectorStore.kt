@@ -15,6 +15,8 @@
  */
 package com.embabel.agent.rag.pgvector
 
+import com.embabel.agent.rag.filter.EntityFilter
+import com.embabel.agent.rag.filter.PropertyFilter
 import com.embabel.agent.rag.ingestion.ChunkTransformer
 import com.embabel.agent.rag.ingestion.ContentChunker
 import com.embabel.agent.rag.ingestion.RetrievableEnhancer
@@ -24,6 +26,8 @@ import com.embabel.agent.rag.model.ContentRoot
 import com.embabel.agent.rag.model.NavigableDocument
 import com.embabel.agent.rag.model.Retrievable
 import com.embabel.agent.rag.service.CoreSearchOperations
+import com.embabel.agent.rag.service.FilteringTextSearch
+import com.embabel.agent.rag.service.FilteringVectorSearch
 import com.embabel.agent.rag.store.AbstractChunkingContentElementRepository
 import com.embabel.agent.rag.store.ChunkingContentElementRepository
 import com.embabel.agent.rag.store.ContentElementRepositoryInfo
@@ -32,14 +36,11 @@ import com.embabel.common.ai.model.EmbeddingService
 import com.embabel.common.core.types.SimilarityResult
 import com.embabel.common.core.types.TextSimilaritySearchRequest
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.springframework.ai.document.Document
-import org.springframework.ai.vectorstore.SearchRequest
-import org.springframework.ai.vectorstore.VectorStore
 import org.springframework.jdbc.core.simple.JdbcClient
 import java.sql.ResultSet
 
 /**
- * PgVector-based implementation of [ChunkingContentElementRepository] using Spring AI's PgVectorStore.
+ * PgVector-based implementation of [ChunkingContentElementRepository] using native pgvector.
  *
  * This implementation features hybrid search combining:
  * - Vector similarity search via pgvector for semantic matching
@@ -50,7 +51,6 @@ import java.sql.ResultSet
  * Hybrid search architecture inspired by [Josh Long's](https://joshlong.com) article
  * [Building a Hybrid Search Engine with PostgreSQL and JDBC](https://joshlong.com/jl/blogPost/building-a-search-engine-with-postgresql-and-jdbc.html)
  *
- * @param vectorStore The Spring AI PgVectorStore instance
  * @param jdbcClient JdbcClient for PostgreSQL operations
  * @param properties Configuration properties for this store
  * @param chunkerConfig Configuration for content chunking
@@ -59,7 +59,6 @@ import java.sql.ResultSet
  * @param enhancers List of enhancers to apply to retrievables
  */
 class PgVectorStore @JvmOverloads constructor(
-    private val vectorStore: VectorStore,
     private val jdbcClient: JdbcClient,
     private val properties: PgVectorStoreProperties,
     chunkerConfig: ContentChunker.Config,
@@ -70,9 +69,11 @@ class PgVectorStore @JvmOverloads constructor(
     chunkerConfig = chunkerConfig,
     chunkTransformer = chunkTransformer,
     embeddingService = embeddingService,
-), ChunkingContentElementRepository, CoreSearchOperations {
+), ChunkingContentElementRepository, CoreSearchOperations,
+    FilteringTextSearch, FilteringVectorSearch {
 
     private val objectMapper = ObjectMapper()
+    private val filterConverter = SqlFilterConverter()
 
     companion object {
         /**
@@ -82,8 +83,8 @@ class PgVectorStore @JvmOverloads constructor(
          * ```java
          * PgVectorStore store = PgVectorStore.builder()
          *     .withDataSource(dataSource)
-         *     .withVectorStore(vectorStore)
          *     .withEmbeddingService(embeddingService)
+         *     .withName("my-rag-store")
          *     .build();
          * ```
          */
@@ -135,6 +136,7 @@ class PgVectorStore @JvmOverloads constructor(
                 clean_text TEXT,
                 tokens TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
                 tsv TSVECTOR,
+                embedding vector(${properties.embeddingDimension}),
                 parent_id VARCHAR(255),
                 labels TEXT[],
                 metadata JSONB,
@@ -181,6 +183,15 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     private fun createIndexes() {
+        // HNSW index for vector similarity search (cosine distance)
+        jdbcClient.sql(
+            """
+            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_embedding
+            ON ${properties.contentElementTable}
+            USING hnsw (embedding vector_cosine_ops)
+            """.trimIndent()
+        ).update()
+
         // GIN index for full-text search
         jdbcClient.sql(
             """
@@ -249,10 +260,7 @@ class PgVectorStore @JvmOverloads constructor(
             return null
         }
 
-        // Delete from vector store
-        vectorStore.delete(listOf(rootId))
-
-        // Delete all descendants using recursive CTE
+        // Delete all descendants using recursive CTE (includes embeddings)
         val deletedCount = jdbcClient.sql(
             """
             WITH RECURSIVE descendants AS (
@@ -307,36 +315,29 @@ class PgVectorStore @JvmOverloads constructor(
         chunks: List<Chunk>,
         embeddings: Map<String, FloatArray>
     ) {
-        // Convert chunks to Spring AI Documents and add to vector store
-        val documents = chunks.map { chunk ->
-            Document(
-                chunk.id,
-                chunk.text,
-                chunk.metadata.mapValues { it.value?.toString() ?: "" }
-            )
-        }
-        vectorStore.add(documents)
-
-        // Also persist chunk details in our content element table
         chunks.forEach { chunk ->
-            saveChunkToTable(chunk)
+            val embedding = embeddings[chunk.id]
+            saveChunkWithEmbedding(chunk, embedding)
         }
-
         logger.info("Persisted {} chunks with embeddings", chunks.size)
     }
 
-    private fun saveChunkToTable(chunk: Chunk) {
+    private fun saveChunkWithEmbedding(chunk: Chunk, embedding: FloatArray?) {
+        val embeddingString = embedding?.joinToString(",", "[", "]")
+
         jdbcClient.sql(
             """
-            INSERT INTO ${properties.contentElementTable} (id, uri, text, urtext, parent_id, labels, metadata)
-            VALUES (:id, :uri, :text, :urtext, :parentId, :labels::text[], :metadata::jsonb)
+            INSERT INTO ${properties.contentElementTable} (id, uri, text, urtext, parent_id, labels, metadata, embedding)
+            VALUES (:id, :uri, :text, :urtext, :parentId, :labels::text[], :metadata::jsonb,
+                    ${if (embeddingString != null) "CAST(:embedding AS vector)" else "NULL"})
             ON CONFLICT (id) DO UPDATE SET
                 uri = EXCLUDED.uri,
                 text = EXCLUDED.text,
                 urtext = EXCLUDED.urtext,
                 parent_id = EXCLUDED.parent_id,
                 labels = EXCLUDED.labels,
-                metadata = EXCLUDED.metadata
+                metadata = EXCLUDED.metadata,
+                embedding = EXCLUDED.embedding
             """.trimIndent()
         )
             .param("id", chunk.id)
@@ -346,6 +347,7 @@ class PgVectorStore @JvmOverloads constructor(
             .param("parentId", chunk.parentId)
             .param("labels", chunk.labels().toTypedArray())
             .param("metadata", toJsonb(chunk.metadata))
+            .apply { if (embeddingString != null) param("embedding", embeddingString) }
             .update()
     }
 
@@ -379,7 +381,6 @@ class PgVectorStore @JvmOverloads constructor(
             ?: throw IllegalStateException("EmbeddingService required for hybrid search")
 
         val embeddingString = queryEmbedding.joinToString(",", "[", "]")
-        val tsQuery = convertToTsQuery(request.query)
 
         // Phase 1: Hybrid vector + full-text search
         val results = jdbcClient.sql(
@@ -497,27 +498,34 @@ class PgVectorStore @JvmOverloads constructor(
             throw IllegalArgumentException("PgVectorStore vectorSearch only supports Chunk class, got: $clazz")
         }
 
-        val searchRequest = SearchRequest.builder()
-            .query(request.query)
-            .topK(request.topK)
-            .similarityThreshold(request.similarityThreshold)
-            .build()
+        // Generate embedding for the query
+        val queryEmbedding = embeddingService?.embed(request.query)
+            ?: throw IllegalStateException("EmbeddingService required for vector search")
 
-        val results = vectorStore.similaritySearch(searchRequest)
+        val embeddingString = queryEmbedding.joinToString(",", "[", "]")
+
+        val results = jdbcClient.sql(
+            """
+            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
+                   (1 - (embedding <=> CAST(:embedding AS vector))) AS score
+            FROM ${properties.contentElementTable}
+            WHERE 'Chunk' = ANY(labels)
+                AND embedding IS NOT NULL
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT :topK
+            """.trimIndent()
+        )
+            .param("embedding", embeddingString)
+            .param("topK", request.topK)
+            .query { rs, _ ->
+                val chunk = mapToChunk(rs)
+                val score = rs.getDouble("score")
+                SimilarityResult(chunk, score)
+            }
+            .list()
 
         @Suppress("UNCHECKED_CAST")
-        return results.map { doc ->
-            val chunk = findChunkById(doc.id) ?: Chunk.create(
-                id = doc.id,
-                text = doc.text ?: "",
-                parentId = doc.metadata["parent_id"]?.toString() ?: "",
-                metadata = doc.metadata.mapValues { it.value }
-            )
-            SimilarityResult(
-                match = chunk,
-                score = doc.score?.toDouble() ?: 0.0
-            )
-        } as List<SimilarityResult<T>>
+        return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
     }
 
     override fun <T : Retrievable> textSearch(
@@ -542,6 +550,103 @@ class PgVectorStore @JvmOverloads constructor(
         )
             .param("tsQuery", tsQuery)
             .param("topK", request.topK)
+            .query { rs, _ ->
+                val chunk = mapToChunk(rs)
+                val score = rs.getDouble("score")
+                SimilarityResult(chunk, score)
+            }
+            .list()
+
+        @Suppress("UNCHECKED_CAST")
+        return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
+    }
+
+    override fun <T : Retrievable> textSearchWithFilter(
+        request: TextSimilaritySearchRequest,
+        clazz: Class<T>,
+        metadataFilter: PropertyFilter?,
+        entityFilter: EntityFilter?
+    ): List<SimilarityResult<T>> {
+        if (clazz != Chunk::class.java) {
+            throw IllegalArgumentException("PgVectorStore textSearchWithFilter only supports Chunk class, got: $clazz")
+        }
+
+        val tsQuery = convertToTsQuery(request.query)
+        val filterResult = filterConverter.combineFilters(metadataFilter, entityFilter)
+
+        val filterClause = if (filterResult.isEmpty()) "" else " AND ${filterResult.whereClause}"
+
+        val sql = """
+            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
+                   ts_rank(tsv, to_tsquery('english', :tsQuery)) as score
+            FROM ${properties.contentElementTable}
+            WHERE 'Chunk' = ANY(labels)
+                AND tsv @@ to_tsquery('english', :tsQuery)
+                $filterClause
+            ORDER BY score DESC
+            LIMIT :topK
+        """.trimIndent()
+
+        var query = jdbcClient.sql(sql)
+            .param("tsQuery", tsQuery)
+            .param("topK", request.topK)
+
+        // Add filter parameters
+        filterResult.parameters.forEach { (key, value) ->
+            query = query.param(key, value)
+        }
+
+        val results = query
+            .query { rs, _ ->
+                val chunk = mapToChunk(rs)
+                val score = rs.getDouble("score")
+                SimilarityResult(chunk, score)
+            }
+            .list()
+
+        @Suppress("UNCHECKED_CAST")
+        return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
+    }
+
+    override fun <T : Retrievable> vectorSearchWithFilter(
+        request: TextSimilaritySearchRequest,
+        clazz: Class<T>,
+        metadataFilter: PropertyFilter?,
+        entityFilter: EntityFilter?
+    ): List<SimilarityResult<T>> {
+        if (clazz != Chunk::class.java) {
+            throw IllegalArgumentException("PgVectorStore vectorSearchWithFilter only supports Chunk class, got: $clazz")
+        }
+
+        // Generate embedding for the query
+        val queryEmbedding = embeddingService?.embed(request.query)
+            ?: throw IllegalStateException("EmbeddingService required for vector search")
+
+        val embeddingString = queryEmbedding.joinToString(",", "[", "]")
+        val filterResult = filterConverter.combineFilters(metadataFilter, entityFilter)
+
+        val filterClause = if (filterResult.isEmpty()) "" else " AND ${filterResult.whereClause}"
+
+        val sql = """
+            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
+                   (1 - (embedding <=> CAST(:embedding AS vector))) AS score
+            FROM ${properties.contentElementTable}
+            WHERE 'Chunk' = ANY(labels)
+                $filterClause
+            ORDER BY score DESC
+            LIMIT :topK
+        """.trimIndent()
+
+        var query = jdbcClient.sql(sql)
+            .param("embedding", embeddingString)
+            .param("topK", request.topK)
+
+        // Add filter parameters
+        filterResult.parameters.forEach { (key, value) ->
+            query = query.param(key, value)
+        }
+
+        val results = query
             .query { rs, _ ->
                 val chunk = mapToChunk(rs)
                 val score = rs.getDouble("score")

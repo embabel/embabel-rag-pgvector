@@ -20,7 +20,6 @@ import com.embabel.agent.rag.ingestion.ContentChunker
 import com.embabel.agent.rag.ingestion.RetrievableEnhancer
 import com.embabel.agent.rag.service.IngestingSearchOperationsBuilder
 import com.embabel.common.ai.model.EmbeddingService
-import org.springframework.ai.vectorstore.VectorStore
 import org.springframework.jdbc.core.simple.JdbcClient
 import javax.sql.DataSource
 
@@ -34,7 +33,6 @@ import javax.sql.DataSource
  * ```kotlin
  * val store = PgVectorStore.builder()
  *     .withDataSource(dataSource)
- *     .withVectorStore(vectorStore)
  *     .withEmbeddingService(embeddingService)
  *     .withName("my-rag-store")
  *     .build()
@@ -44,7 +42,6 @@ import javax.sql.DataSource
  * ```java
  * PgVectorStore store = PgVectorStore.builder()
  *     .withDataSource(dataSource)
- *     .withVectorStore(vectorStore)
  *     .withEmbeddingService(embeddingService)
  *     .withName("my-rag-store")
  *     .build();
@@ -52,7 +49,6 @@ import javax.sql.DataSource
  */
 data class PgVectorStoreBuilder(
     private val name: String = "pgvector-store",
-    private val vectorStore: VectorStore? = null,
     private val jdbcClient: JdbcClient? = null,
     private val dataSource: DataSource? = null,
     private val embeddingService: EmbeddingService? = null,
@@ -61,6 +57,7 @@ data class PgVectorStoreBuilder(
     private val enhancers: List<RetrievableEnhancer> = emptyList(),
     private val contentElementTable: String = "content_elements",
     private val schemaName: String = "public",
+    private val embeddingDimension: Int = 1536,
     private val vectorWeight: Double = 0.7,
     private val ftsWeight: Double = 0.3,
     private val fuzzyThreshold: Double = 0.2,
@@ -79,13 +76,6 @@ data class PgVectorStoreBuilder(
 
     override fun withChunkerConfig(chunkerConfig: ContentChunker.Config): PgVectorStoreBuilder =
         copy(chunkerConfig = chunkerConfig)
-
-    /**
-     * Sets the Spring AI VectorStore for vector similarity search.
-     * Required for build().
-     */
-    fun withVectorStore(vectorStore: VectorStore): PgVectorStoreBuilder =
-        copy(vectorStore = vectorStore)
 
     /**
      * Sets the JdbcClient for database operations.
@@ -126,6 +116,15 @@ data class PgVectorStoreBuilder(
      */
     fun withSchemaName(schemaName: String): PgVectorStoreBuilder =
         copy(schemaName = schemaName)
+
+    /**
+     * Sets the dimension of embedding vectors.
+     * Defaults to 1536 (OpenAI text-embedding-ada-002).
+     */
+    fun withEmbeddingDimension(embeddingDimension: Int): PgVectorStoreBuilder {
+        require(embeddingDimension > 0) { "embeddingDimension must be positive" }
+        return copy(embeddingDimension = embeddingDimension)
+    }
 
     /**
      * Sets the weight for vector similarity score in hybrid search.
@@ -172,20 +171,17 @@ data class PgVectorStoreBuilder(
             ?: dataSource?.let { JdbcClient.create(it) }
             ?: throw IllegalStateException("Either jdbcClient or dataSource must be provided")
 
-        val resolvedVectorStore = vectorStore
-            ?: throw IllegalStateException("vectorStore must be provided")
-
         val properties = PgVectorStoreProperties(
             name = name,
             contentElementTable = contentElementTable,
             schemaName = schemaName,
+            embeddingDimension = embeddingDimension,
             vectorWeight = vectorWeight,
             ftsWeight = ftsWeight,
             fuzzyThreshold = fuzzyThreshold,
         )
 
         val store = PgVectorStore(
-            vectorStore = resolvedVectorStore,
             jdbcClient = resolvedJdbcClient,
             properties = properties,
             chunkerConfig = chunkerConfig,
@@ -207,20 +203,17 @@ data class PgVectorStoreBuilder(
             ?: dataSource?.let { JdbcClient.create(it) }
             ?: throw IllegalStateException("Either jdbcClient or dataSource must be provided")
 
-        val resolvedVectorStore = vectorStore
-            ?: throw IllegalStateException("vectorStore must be provided")
-
         val properties = PgVectorStoreProperties(
             name = name,
             contentElementTable = contentElementTable,
             schemaName = schemaName,
+            embeddingDimension = embeddingDimension,
             vectorWeight = vectorWeight,
             ftsWeight = ftsWeight,
             fuzzyThreshold = fuzzyThreshold,
         )
 
         return PgVectorStore(
-            vectorStore = resolvedVectorStore,
             jdbcClient = resolvedJdbcClient,
             properties = properties,
             chunkerConfig = chunkerConfig,
