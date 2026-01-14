@@ -1,0 +1,24 @@
+# Docker Compose configuration for PostgreSQL with pgvector and pg_trgm extensions
+# Use this as a starting point for projects using embabel-rag-pgvector
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: embabel-pgvector
+    environment:
+      POSTGRES_DB: embabel_rag
+      POSTGRES_USER: embabel
+      POSTGRES_PASSWORD: embabel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U embabel -d embabel_rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgvector_data:
