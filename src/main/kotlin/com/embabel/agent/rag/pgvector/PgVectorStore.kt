@@ -74,6 +74,30 @@ class PgVectorStore @JvmOverloads constructor(
 
     private val objectMapper = ObjectMapper()
 
+    companion object {
+        /**
+         * Creates a new builder for PgVectorStore.
+         *
+         * Example usage in Java:
+         * ```java
+         * PgVectorStore store = PgVectorStore.builder()
+         *     .withDataSource(dataSource)
+         *     .withVectorStore(vectorStore)
+         *     .withEmbeddingService(embeddingService)
+         *     .build();
+         * ```
+         */
+        @JvmStatic
+        fun builder(): PgVectorStoreBuilder = PgVectorStoreBuilder()
+
+        /**
+         * Creates a new builder with the specified name.
+         */
+        @JvmStatic
+        fun withName(name: String): PgVectorStoreBuilder =
+            PgVectorStoreBuilder().withName(name)
+    }
+
     override val name: String get() = properties.name
 
     override val luceneSyntaxNotes: String = """
