@@ -26,7 +26,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
-import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.core.simple.JdbcClient
+import javax.sql.DataSource
 
 /**
  * Auto-configuration for [PgVectorStore].
@@ -34,7 +35,7 @@ import org.springframework.jdbc.core.JdbcTemplate
  * This configuration is activated when:
  * - Spring AI's VectorStore is on the classpath
  * - A VectorStore bean is available
- * - A JdbcTemplate bean is available
+ * - A DataSource bean is available
  */
 @AutoConfiguration
 @ConditionalOnClass(VectorStore::class)
@@ -42,11 +43,18 @@ import org.springframework.jdbc.core.JdbcTemplate
 class PgVectorAutoConfiguration {
 
     @Bean
+    @ConditionalOnMissingBean(JdbcClient::class)
+    @ConditionalOnBean(DataSource::class)
+    fun jdbcClient(dataSource: DataSource): JdbcClient {
+        return JdbcClient.create(dataSource)
+    }
+
+    @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnBean(VectorStore::class, JdbcTemplate::class)
+    @ConditionalOnBean(VectorStore::class, JdbcClient::class)
     fun pgVectorStore(
         vectorStore: VectorStore,
-        jdbcTemplate: JdbcTemplate,
+        jdbcClient: JdbcClient,
         properties: PgVectorStoreProperties,
         chunkerConfig: ContentChunker.Config,
         chunkTransformer: ChunkTransformer,
@@ -55,7 +63,7 @@ class PgVectorAutoConfiguration {
     ): PgVectorStore {
         return PgVectorStore(
             vectorStore = vectorStore,
-            jdbcTemplate = jdbcTemplate,
+            jdbcClient = jdbcClient,
             properties = properties,
             chunkerConfig = chunkerConfig,
             chunkTransformer = chunkTransformer,

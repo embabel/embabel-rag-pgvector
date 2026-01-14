@@ -31,22 +31,27 @@ import com.embabel.agent.rag.store.DocumentDeletionResult
 import com.embabel.common.ai.model.EmbeddingService
 import com.embabel.common.core.types.SimilarityResult
 import com.embabel.common.core.types.TextSimilaritySearchRequest
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.ai.document.Document
 import org.springframework.ai.vectorstore.SearchRequest
 import org.springframework.ai.vectorstore.VectorStore
-import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.core.simple.JdbcClient
+import java.sql.ResultSet
 
 /**
  * PgVector-based implementation of [ChunkingContentElementRepository] using Spring AI's PgVectorStore.
  *
- * This implementation:
- * - Uses PostgreSQL with pgvector extension for vector similarity search
- * - Supports full-text search via PostgreSQL's tsvector/tsquery
- * - Persists content element metadata in a dedicated table
- * - Implements [CoreSearchOperations] for standard RAG operations
+ * This implementation features hybrid search combining:
+ * - Vector similarity search via pgvector for semantic matching
+ * - Full-text search using PostgreSQL's tsvector/tsquery
+ * - Trigram fuzzy matching via pg_trgm for typo-tolerant search
+ * - Weighted hybrid scoring combining vector and lexical results
+ *
+ * Hybrid search architecture inspired by [Josh Long's](https://joshlong.com) article
+ * [Building a Hybrid Search Engine with PostgreSQL and JDBC](https://joshlong.com/jl/blogPost/building-a-search-engine-with-postgresql-and-jdbc.html)
  *
  * @param vectorStore The Spring AI PgVectorStore instance
- * @param jdbcTemplate JDBC template for PostgreSQL operations
+ * @param jdbcClient JdbcClient for PostgreSQL operations
  * @param properties Configuration properties for this store
  * @param chunkerConfig Configuration for content chunking
  * @param chunkTransformer Transformer for processing chunks
@@ -55,7 +60,7 @@ import org.springframework.jdbc.core.JdbcTemplate
  */
 class PgVectorStore @JvmOverloads constructor(
     private val vectorStore: VectorStore,
-    private val jdbcTemplate: JdbcTemplate,
+    private val jdbcClient: JdbcClient,
     private val properties: PgVectorStoreProperties,
     chunkerConfig: ContentChunker.Config,
     chunkTransformer: ChunkTransformer,
@@ -66,6 +71,8 @@ class PgVectorStore @JvmOverloads constructor(
     chunkTransformer = chunkTransformer,
     embeddingService = embeddingService,
 ), ChunkingContentElementRepository, CoreSearchOperations {
+
+    private val objectMapper = ObjectMapper()
 
     override val name: String get() = properties.name
 
@@ -80,38 +87,113 @@ class PgVectorStore @JvmOverloads constructor(
 
     override fun provision() {
         logger.info("Provisioning PgVectorStore with properties {}", properties)
+        createExtensions()
         createContentElementTable()
-        createFullTextIndex()
+        createTsvTrigger()
+        createIndexes()
         logger.info("Provisioning complete")
     }
 
+    private fun createExtensions() {
+        jdbcClient.sql("CREATE EXTENSION IF NOT EXISTS vector").update()
+        jdbcClient.sql("CREATE EXTENSION IF NOT EXISTS pg_trgm").update()
+        logger.info("Created PostgreSQL extensions: vector, pg_trgm")
+    }
+
     private fun createContentElementTable() {
-        jdbcTemplate.execute(
+        jdbcClient.sql(
             """
             CREATE TABLE IF NOT EXISTS ${properties.contentElementTable} (
                 id VARCHAR(255) PRIMARY KEY,
                 uri TEXT,
                 text TEXT,
                 urtext TEXT,
+                clean_text TEXT,
+                tokens TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+                tsv TSVECTOR,
                 parent_id VARCHAR(255),
                 labels TEXT[],
                 metadata JSONB,
                 ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """.trimIndent()
-        )
+        ).update()
         logger.info("Created content element table: {}", properties.contentElementTable)
     }
 
-    private fun createFullTextIndex() {
-        jdbcTemplate.execute(
+    private fun createTsvTrigger() {
+        // Create the trigger function for automatic tsvector maintenance
+        jdbcClient.sql(
             """
-            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_text_search
-            ON ${properties.contentElementTable}
-            USING GIN (to_tsvector('english', text))
+            CREATE OR REPLACE FUNCTION ${properties.contentElementTable}_tsv_trigger()
+            RETURNS TRIGGER AS ${'$'}${'$'}
+            BEGIN
+                NEW.tsv := to_tsvector('english', COALESCE(NEW.text, ''));
+                NEW.clean_text := regexp_replace(LOWER(COALESCE(NEW.text, '')), '[^a-z0-9\s]', '', 'g');
+                NEW.tokens := regexp_split_to_array(NEW.clean_text, '\s+');
+                RETURN NEW;
+            END;
+            ${'$'}${'$'} LANGUAGE plpgsql
             """.trimIndent()
-        )
-        logger.info("Created full-text search index on {}", properties.contentElementTable)
+        ).update()
+
+        // Create the trigger
+        jdbcClient.sql(
+            """
+            DROP TRIGGER IF EXISTS ${properties.contentElementTable}_tsv_update ON ${properties.contentElementTable}
+            """.trimIndent()
+        ).update()
+
+        jdbcClient.sql(
+            """
+            CREATE TRIGGER ${properties.contentElementTable}_tsv_update
+            BEFORE INSERT OR UPDATE ON ${properties.contentElementTable}
+            FOR EACH ROW
+            EXECUTE FUNCTION ${properties.contentElementTable}_tsv_trigger()
+            """.trimIndent()
+        ).update()
+
+        logger.info("Created tsvector trigger for automatic maintenance on {}", properties.contentElementTable)
+    }
+
+    private fun createIndexes() {
+        // GIN index for full-text search
+        jdbcClient.sql(
+            """
+            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_tsv
+            ON ${properties.contentElementTable}
+            USING GIN (tsv)
+            """.trimIndent()
+        ).update()
+
+        // GIN index for trigram fuzzy search
+        jdbcClient.sql(
+            """
+            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_text_trgm
+            ON ${properties.contentElementTable}
+            USING GIN (text gin_trgm_ops)
+            """.trimIndent()
+        ).update()
+
+        // GIN index for metadata JSONB
+        jdbcClient.sql(
+            """
+            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_metadata
+            ON ${properties.contentElementTable}
+            USING GIN (metadata)
+            """.trimIndent()
+        ).update()
+
+        // Index on labels array
+        jdbcClient.sql(
+            """
+            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_labels
+            ON ${properties.contentElementTable}
+            USING GIN (labels)
+            """.trimIndent()
+        ).update()
+
+        logger.info("Created indexes on {}", properties.contentElementTable)
     }
 
     override fun commit() {
@@ -120,7 +202,6 @@ class PgVectorStore @JvmOverloads constructor(
 
     override fun createInternalRelationships(root: NavigableDocument) {
         // In PostgreSQL, relationships are implicit via parent_id foreign keys
-        // No explicit relationship creation needed
         logger.debug("Internal relationships managed via parent_id column for document {}", root.id)
     }
 
@@ -128,14 +209,18 @@ class PgVectorStore @JvmOverloads constructor(
         logger.info("Deleting document with URI: {}", uri)
 
         // First find the root document
-        val rootId = jdbcTemplate.queryForObject(
+        val rootId = jdbcClient.sql(
             """
             SELECT id FROM ${properties.contentElementTable}
-            WHERE uri = ? AND 'Document' = ANY(labels)
-            """.trimIndent(),
-            String::class.java,
-            uri
-        ) ?: run {
+            WHERE uri = :uri AND 'Document' = ANY(labels)
+            """.trimIndent()
+        )
+            .param("uri", uri)
+            .query(String::class.java)
+            .optional()
+            .orElse(null)
+
+        if (rootId == null) {
             logger.warn("No document found with URI: {}", uri)
             return null
         }
@@ -144,19 +229,20 @@ class PgVectorStore @JvmOverloads constructor(
         vectorStore.delete(listOf(rootId))
 
         // Delete all descendants using recursive CTE
-        val deletedCount = jdbcTemplate.update(
+        val deletedCount = jdbcClient.sql(
             """
             WITH RECURSIVE descendants AS (
-                SELECT id FROM ${properties.contentElementTable} WHERE id = ?
+                SELECT id FROM ${properties.contentElementTable} WHERE id = :rootId
                 UNION ALL
                 SELECT ce.id FROM ${properties.contentElementTable} ce
                 INNER JOIN descendants d ON ce.parent_id = d.id
             )
             DELETE FROM ${properties.contentElementTable}
             WHERE id IN (SELECT id FROM descendants)
-            """.trimIndent(),
-            rootId
+            """.trimIndent()
         )
+            .param("rootId", rootId)
+            .update()
 
         logger.info("Deleted {} elements for document with URI: {}", deletedCount, uri)
         return DocumentDeletionResult(
@@ -166,29 +252,31 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     override fun existsRootWithUri(uri: String): Boolean {
-        val count = jdbcTemplate.queryForObject(
+        val count = jdbcClient.sql(
             """
             SELECT COUNT(*) FROM ${properties.contentElementTable}
-            WHERE uri = ? AND ('Document' = ANY(labels) OR 'ContentRoot' = ANY(labels))
-            """.trimIndent(),
-            Int::class.java,
-            uri
-        ) ?: 0
+            WHERE uri = :uri AND ('Document' = ANY(labels) OR 'ContentRoot' = ANY(labels))
+            """.trimIndent()
+        )
+            .param("uri", uri)
+            .query(Int::class.java)
+            .single()
         return count > 0
     }
 
     override fun findContentRootByUri(uri: String): ContentRoot? {
         logger.debug("Finding root document with URI: {}", uri)
-        val results = jdbcTemplate.query(
+        return jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
             FROM ${properties.contentElementTable}
-            WHERE uri = ? AND ('Document' = ANY(labels) OR 'ContentRoot' = ANY(labels))
-            """.trimIndent(),
-            { rs, _ -> mapToContentElement(rs) },
-            uri
+            WHERE uri = :uri AND ('Document' = ANY(labels) OR 'ContentRoot' = ANY(labels))
+            """.trimIndent()
         )
-        return results.firstOrNull() as? ContentRoot
+            .param("uri", uri)
+            .query { rs, _ -> mapToContentElement(rs) }
+            .optional()
+            .orElse(null) as? ContentRoot
     }
 
     override fun persistChunksWithEmbeddings(
@@ -214,10 +302,10 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     private fun saveChunkToTable(chunk: Chunk) {
-        jdbcTemplate.update(
+        jdbcClient.sql(
             """
             INSERT INTO ${properties.contentElementTable} (id, uri, text, urtext, parent_id, labels, metadata)
-            VALUES (?, ?, ?, ?, ?, ?::text[], ?::jsonb)
+            VALUES (:id, :uri, :text, :urtext, :parentId, :labels::text[], :metadata::jsonb)
             ON CONFLICT (id) DO UPDATE SET
                 uri = EXCLUDED.uri,
                 text = EXCLUDED.text,
@@ -225,19 +313,156 @@ class PgVectorStore @JvmOverloads constructor(
                 parent_id = EXCLUDED.parent_id,
                 labels = EXCLUDED.labels,
                 metadata = EXCLUDED.metadata
-            """.trimIndent(),
-            chunk.id,
-            chunk.uri,
-            chunk.text,
-            chunk.urtext,
-            chunk.parentId,
-            chunk.labels().toTypedArray(),
-            toJsonb(chunk.metadata)
+            """.trimIndent()
         )
+            .param("id", chunk.id)
+            .param("uri", chunk.uri)
+            .param("text", chunk.text)
+            .param("urtext", chunk.urtext)
+            .param("parentId", chunk.parentId)
+            .param("labels", chunk.labels().toTypedArray())
+            .param("metadata", toJsonb(chunk.metadata))
+            .update()
     }
 
     override fun supportsType(type: String): Boolean {
         return type == Chunk::class.java.simpleName
+    }
+
+    /**
+     * Performs hybrid search combining vector similarity and full-text search.
+     *
+     * This method uses a two-phase approach:
+     * 1. Uses full-text search (FTS) as a cheap prefilter to find candidate chunks
+     * 2. Computes expensive vector similarity only on FTS matches
+     * 3. Combines scores with configurable weights (default: 70% vector, 30% FTS)
+     * 4. Falls back to fuzzy trigram search if no results found
+     *
+     * @param request The search request containing query and parameters
+     * @param clazz The class type of results (must be Chunk)
+     * @return List of similarity results with combined scores
+     */
+    fun <T : Retrievable> hybridSearch(
+        request: TextSimilaritySearchRequest,
+        clazz: Class<T>
+    ): List<SimilarityResult<T>> {
+        if (clazz != Chunk::class.java) {
+            throw IllegalArgumentException("PgVectorStore hybridSearch only supports Chunk class, got: $clazz")
+        }
+
+        // Generate embedding for the query
+        val queryEmbedding = embeddingService?.embed(request.query)
+            ?: throw IllegalStateException("EmbeddingService required for hybrid search")
+
+        val embeddingString = queryEmbedding.joinToString(",", "[", "]")
+        val tsQuery = convertToTsQuery(request.query)
+
+        // Phase 1: Hybrid vector + full-text search
+        val results = jdbcClient.sql(
+            """
+            WITH fts AS (
+                SELECT id, ts_rank(tsv, plainto_tsquery('english', :query)) AS fts_score
+                FROM ${properties.contentElementTable}
+                WHERE 'Chunk' = ANY(labels)
+                    AND tsv @@ plainto_tsquery('english', :query)
+            )
+            SELECT dc.id,
+                   dc.uri,
+                   dc.text,
+                   dc.urtext,
+                   dc.parent_id,
+                   dc.labels,
+                   dc.metadata,
+                   dc.ingestion_timestamp,
+                   (1 - (dc.embedding <=> CAST(:embedding AS vector))) AS vec_score,
+                   f.fts_score,
+                   :vectorWeight * (1 - (dc.embedding <=> CAST(:embedding AS vector))) + :ftsWeight * f.fts_score AS score
+            FROM fts f
+            JOIN ${properties.contentElementTable} dc ON f.id = dc.id
+            ORDER BY score DESC
+            LIMIT :topK
+            """.trimIndent()
+        )
+            .param("query", request.query)
+            .param("embedding", embeddingString)
+            .param("vectorWeight", properties.vectorWeight)
+            .param("ftsWeight", properties.ftsWeight)
+            .param("topK", request.topK)
+            .query { rs, _ ->
+                val chunk = mapToChunk(rs)
+                val score = rs.getDouble("score")
+                SimilarityResult(chunk, score)
+            }
+            .list()
+            .filter { it.score >= request.similarityThreshold }
+
+        // Phase 2: Fuzzy fallback if no results
+        @Suppress("UNCHECKED_CAST")
+        if (results.isEmpty()) {
+            logger.debug("No hybrid search results, falling back to fuzzy search for query: {}", request.query)
+            return fuzzySearch(request, clazz)
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        return results as List<SimilarityResult<T>>
+    }
+
+    /**
+     * Performs fuzzy search using PostgreSQL's pg_trgm trigram similarity.
+     *
+     * This is used as a fallback when hybrid search returns no results,
+     * handling typos, misspellings, and partial matches.
+     *
+     * @param request The search request containing query and parameters
+     * @param clazz The class type of results (must be Chunk)
+     * @return List of similarity results based on trigram similarity
+     */
+    fun <T : Retrievable> fuzzySearch(
+        request: TextSimilaritySearchRequest,
+        clazz: Class<T>
+    ): List<SimilarityResult<T>> {
+        if (clazz != Chunk::class.java) {
+            throw IllegalArgumentException("PgVectorStore fuzzySearch only supports Chunk class, got: $clazz")
+        }
+
+        val results = jdbcClient.sql(
+            """
+            SELECT id,
+                   uri,
+                   text,
+                   urtext,
+                   parent_id,
+                   labels,
+                   metadata,
+                   ingestion_timestamp,
+                   (
+                       SELECT MAX(similarity(w, :query))
+                       FROM unnest(tokens) AS w
+                   ) AS score
+            FROM ${properties.contentElementTable}
+            WHERE 'Chunk' = ANY(labels)
+                AND (
+                    SELECT MAX(similarity(w, :query))
+                    FROM unnest(tokens) AS w
+                ) > :threshold
+            ORDER BY score DESC
+            LIMIT :topK
+            """.trimIndent()
+        )
+            .param("query", request.query.lowercase())
+            .param("threshold", properties.fuzzyThreshold)
+            .param("topK", request.topK)
+            .query { rs, _ ->
+                val chunk = mapToChunk(rs)
+                val score = rs.getDouble("score")
+                SimilarityResult(chunk, score)
+            }
+            .list()
+
+        logger.debug("Fuzzy search returned {} results for query: {}", results.size, request.query)
+
+        @Suppress("UNCHECKED_CAST")
+        return results as List<SimilarityResult<T>>
     }
 
     override fun <T : Retrievable> vectorSearch(
@@ -280,25 +505,25 @@ class PgVectorStore @JvmOverloads constructor(
         }
 
         val tsQuery = convertToTsQuery(request.query)
-        val results = jdbcTemplate.query(
+        val results = jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   ts_rank(to_tsvector('english', text), to_tsquery('english', ?)) as score
+                   ts_rank(tsv, to_tsquery('english', :tsQuery)) as score
             FROM ${properties.contentElementTable}
             WHERE 'Chunk' = ANY(labels)
-                AND to_tsvector('english', text) @@ to_tsquery('english', ?)
+                AND tsv @@ to_tsquery('english', :tsQuery)
             ORDER BY score DESC
-            LIMIT ?
-            """.trimIndent(),
-            { rs, _ ->
+            LIMIT :topK
+            """.trimIndent()
+        )
+            .param("tsQuery", tsQuery)
+            .param("topK", request.topK)
+            .query { rs, _ ->
                 val chunk = mapToChunk(rs)
                 val score = rs.getDouble("score")
                 SimilarityResult(chunk, score)
-            },
-            tsQuery,
-            tsQuery,
-            request.topK
-        )
+            }
+            .list()
 
         @Suppress("UNCHECKED_CAST")
         return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
@@ -313,7 +538,7 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     override fun info(): ContentElementRepositoryInfo {
-        val stats = jdbcTemplate.queryForMap(
+        val stats = jdbcClient.sql(
             """
             SELECT
                 (SELECT COUNT(*) FROM ${properties.contentElementTable} WHERE 'Chunk' = ANY(labels)) as chunk_count,
@@ -321,10 +546,19 @@ class PgVectorStore @JvmOverloads constructor(
                 (SELECT COUNT(*) FROM ${properties.contentElementTable}) as content_element_count
             """.trimIndent()
         )
+            .query { rs, _ ->
+                mapOf(
+                    "chunk_count" to rs.getInt("chunk_count"),
+                    "document_count" to rs.getInt("document_count"),
+                    "content_element_count" to rs.getInt("content_element_count")
+                )
+            }
+            .single()
+
         return PgVectorContentElementRepositoryInfo(
-            chunkCount = (stats["chunk_count"] as? Number)?.toInt() ?: 0,
-            documentCount = (stats["document_count"] as? Number)?.toInt() ?: 0,
-            contentElementCount = (stats["content_element_count"] as? Number)?.toInt() ?: 0,
+            chunkCount = stats["chunk_count"] ?: 0,
+            documentCount = stats["document_count"] ?: 0,
+            contentElementCount = stats["content_element_count"] ?: 0,
             hasEmbeddings = embeddingService != null,
             isPersistent = true
         )
@@ -332,48 +566,51 @@ class PgVectorStore @JvmOverloads constructor(
 
     override fun findAllChunksById(chunkIds: List<String>): Iterable<Chunk> {
         if (chunkIds.isEmpty()) return emptyList()
-        return jdbcTemplate.query(
+        return jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
             FROM ${properties.contentElementTable}
-            WHERE id = ANY(?) AND 'Chunk' = ANY(labels)
-            """.trimIndent(),
-            { rs, _ -> mapToChunk(rs) },
-            chunkIds.toTypedArray()
+            WHERE id = ANY(:ids) AND 'Chunk' = ANY(labels)
+            """.trimIndent()
         )
+            .param("ids", chunkIds.toTypedArray())
+            .query { rs, _ -> mapToChunk(rs) }
+            .list()
     }
 
     override fun findById(id: String): ContentElement? {
-        val results = jdbcTemplate.query(
+        return jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
             FROM ${properties.contentElementTable}
-            WHERE id = ?
-            """.trimIndent(),
-            { rs, _ -> mapToContentElement(rs) },
-            id
+            WHERE id = :id
+            """.trimIndent()
         )
-        return results.firstOrNull()
+            .param("id", id)
+            .query { rs, _ -> mapToContentElement(rs) }
+            .optional()
+            .orElse(null)
     }
 
     private fun findChunkById(id: String): Chunk? {
-        val results = jdbcTemplate.query(
+        return jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
             FROM ${properties.contentElementTable}
-            WHERE id = ? AND 'Chunk' = ANY(labels)
-            """.trimIndent(),
-            { rs, _ -> mapToChunk(rs) },
-            id
+            WHERE id = :id AND 'Chunk' = ANY(labels)
+            """.trimIndent()
         )
-        return results.firstOrNull()
+            .param("id", id)
+            .query { rs, _ -> mapToChunk(rs) }
+            .optional()
+            .orElse(null)
     }
 
     override fun save(element: ContentElement): ContentElement {
-        jdbcTemplate.update(
+        jdbcClient.sql(
             """
             INSERT INTO ${properties.contentElementTable} (id, uri, text, urtext, parent_id, labels, metadata)
-            VALUES (?, ?, ?, ?, ?, ?::text[], ?::jsonb)
+            VALUES (:id, :uri, :text, :urtext, :parentId, :labels::text[], :metadata::jsonb)
             ON CONFLICT (id) DO UPDATE SET
                 uri = EXCLUDED.uri,
                 text = EXCLUDED.text,
@@ -381,31 +618,30 @@ class PgVectorStore @JvmOverloads constructor(
                 parent_id = EXCLUDED.parent_id,
                 labels = EXCLUDED.labels,
                 metadata = EXCLUDED.metadata
-            """.trimIndent(),
-            element.id,
-            element.uri,
-            (element as? Chunk)?.text,
-            (element as? Chunk)?.urtext,
-            (element as? com.embabel.agent.rag.model.HierarchicalContentElement)?.parentId,
-            element.labels().toTypedArray(),
-            toJsonb(element.propertiesToPersist())
+            """.trimIndent()
         )
+            .param("id", element.id)
+            .param("uri", element.uri)
+            .param("text", (element as? Chunk)?.text)
+            .param("urtext", (element as? Chunk)?.urtext)
+            .param("parentId", (element as? com.embabel.agent.rag.model.HierarchicalContentElement)?.parentId)
+            .param("labels", element.labels().toTypedArray())
+            .param("metadata", toJsonb(element.propertiesToPersist()))
+            .update()
         return element
     }
 
     override fun findChunksForEntity(entityId: String): List<Chunk> {
         // Entity-chunk relationships would need to be stored separately if needed
-        // For now, return empty list as this implementation focuses on basic RAG
         logger.warn("findChunksForEntity not implemented for PgVectorStore")
         return emptyList()
     }
 
-    private fun mapToContentElement(rs: java.sql.ResultSet): ContentElement {
+    private fun mapToContentElement(rs: ResultSet): ContentElement {
         val labels = (rs.getArray("labels")?.array as? Array<*>)?.map { it.toString() }?.toSet() ?: emptySet()
         return if ("Chunk" in labels) {
             mapToChunk(rs)
         } else {
-            // Return a basic content element for non-chunk types
             GenericContentElement(
                 id = rs.getString("id"),
                 uri = rs.getString("uri"),
@@ -415,7 +651,7 @@ class PgVectorStore @JvmOverloads constructor(
         }
     }
 
-    private fun mapToChunk(rs: java.sql.ResultSet): Chunk {
+    private fun mapToChunk(rs: ResultSet): Chunk {
         return Chunk.create(
             id = rs.getString("id"),
             text = rs.getString("text") ?: "",
@@ -426,13 +662,13 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     private fun toJsonb(map: Map<String, Any?>): String {
-        return com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(map)
+        return objectMapper.writeValueAsString(map)
     }
 
     private fun parseJsonb(json: String?): Map<String, Any?> {
         if (json.isNullOrBlank()) return emptyMap()
         @Suppress("UNCHECKED_CAST")
-        return com.fasterxml.jackson.databind.ObjectMapper().readValue(json, Map::class.java) as Map<String, Any?>
+        return objectMapper.readValue(json, Map::class.java) as Map<String, Any?>
     }
 }
 
@@ -458,4 +694,3 @@ data class GenericContentElement(
 ) : ContentElement {
     override fun labels(): Set<String> = labels + setOf("ContentElement")
 }
-
