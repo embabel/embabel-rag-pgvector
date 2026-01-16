@@ -131,6 +131,7 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     private fun createContentElementTable() {
+        // Create table if not exists
         jdbcClient.sql(
             """
             CREATE TABLE IF NOT EXISTS ${properties.contentElementTable} (
@@ -149,7 +150,31 @@ class PgVectorStore @JvmOverloads constructor(
             )
             """.trimIndent()
         ).update()
-        logger.info("Created content element table: {}", properties.contentElementTable)
+
+        // Add missing columns if table already existed (for schema migration)
+        addColumnIfNotExists("embedding", "vector(${properties.embeddingDimension})")
+        addColumnIfNotExists("clean_text", "TEXT")
+        addColumnIfNotExists("tokens", "TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]")
+        addColumnIfNotExists("tsv", "TSVECTOR")
+
+        logger.info("Created/updated content element table: {}", properties.contentElementTable)
+    }
+
+    private fun addColumnIfNotExists(columnName: String, columnType: String) {
+        jdbcClient.sql(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = '${properties.contentElementTable}'
+                    AND column_name = '$columnName'
+                ) THEN
+                    ALTER TABLE ${properties.contentElementTable} ADD COLUMN $columnName $columnType;
+                END IF;
+            END $$
+            """.trimIndent()
+        ).update()
     }
 
     private fun createTsvTrigger() {
@@ -185,6 +210,18 @@ class PgVectorStore @JvmOverloads constructor(
         ).update()
 
         logger.info("Created tsvector trigger for automatic maintenance on {}", properties.contentElementTable)
+
+        // Backfill tsv for any existing rows that have NULL tsv
+        val updated = jdbcClient.sql(
+            """
+            UPDATE ${properties.contentElementTable}
+            SET text = text
+            WHERE tsv IS NULL AND text IS NOT NULL
+            """.trimIndent()
+        ).update()
+        if (updated > 0) {
+            logger.info("Backfilled tsv for {} existing rows", updated)
+        }
     }
 
     private fun createIndexes() {
@@ -541,19 +578,19 @@ class PgVectorStore @JvmOverloads constructor(
             throw IllegalArgumentException("PgVectorStore textSearch only supports Chunk class, got: $clazz")
         }
 
-        val tsQuery = convertToTsQuery(request.query)
+        // Use plainto_tsquery for natural language queries (handles plain text better than to_tsquery)
         val results = jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   ts_rank(tsv, to_tsquery('english', :tsQuery)) as score
+                   ts_rank(tsv, plainto_tsquery('english', :query)) as score
             FROM ${properties.contentElementTable}
             WHERE 'Chunk' = ANY(labels)
-                AND tsv @@ to_tsquery('english', :tsQuery)
+                AND tsv @@ plainto_tsquery('english', :query)
             ORDER BY score DESC
             LIMIT :topK
             """.trimIndent()
         )
-            .param("tsQuery", tsQuery)
+            .param("query", request.query)
             .param("topK", request.topK)
             .query { rs, _ ->
                 val chunk = mapToChunk(rs)
@@ -576,24 +613,22 @@ class PgVectorStore @JvmOverloads constructor(
             throw IllegalArgumentException("PgVectorStore textSearchWithFilter only supports Chunk class, got: $clazz")
         }
 
-        val tsQuery = convertToTsQuery(request.query)
         val filterResult = filterConverter.combineFilters(metadataFilter, entityFilter)
-
         val filterClause = if (filterResult.isEmpty()) "" else " AND ${filterResult.whereClause}"
 
         val sql = """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   ts_rank(tsv, to_tsquery('english', :tsQuery)) as score
+                   ts_rank(tsv, plainto_tsquery('english', :query)) as score
             FROM ${properties.contentElementTable}
             WHERE 'Chunk' = ANY(labels)
-                AND tsv @@ to_tsquery('english', :tsQuery)
+                AND tsv @@ plainto_tsquery('english', :query)
                 $filterClause
             ORDER BY score DESC
             LIMIT :topK
         """.trimIndent()
 
         var query = jdbcClient.sql(sql)
-            .param("tsQuery", tsQuery)
+            .param("query", request.query)
             .param("topK", request.topK)
 
         // Add filter parameters
@@ -661,14 +696,6 @@ class PgVectorStore @JvmOverloads constructor(
 
         @Suppress("UNCHECKED_CAST")
         return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
-    }
-
-    private fun convertToTsQuery(query: String): String {
-        // Convert natural language query to PostgreSQL tsquery format
-        return query.trim()
-            .split("\\s+".toRegex())
-            .filter { it.isNotBlank() }
-            .joinToString(" & ")
     }
 
     override fun info(): ContentElementRepositoryInfo {
