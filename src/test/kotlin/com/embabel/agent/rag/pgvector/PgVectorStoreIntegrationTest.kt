@@ -42,6 +42,7 @@ class PgVectorStoreIntegrationTest {
         @JvmStatic
         val postgres: PostgreSQLContainer<*> = PostgreSQLContainer(
             DockerImageName.parse("pgvector/pgvector:pg17")
+                .asCompatibleSubstituteFor("postgres")
         )
             .withDatabaseName("testdb")
             .withUsername("test")
