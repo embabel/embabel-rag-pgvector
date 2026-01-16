@@ -425,10 +425,14 @@ class PgVectorStore @JvmOverloads constructor(
         val embeddingString = queryEmbedding.joinToString(",", "[", "]")
 
         // Phase 1: Hybrid vector + full-text search
+        // Normalize fts_score to 0-1 range using score/(1+score) transformation
         val results = jdbcClient.sql(
             """
             WITH fts AS (
-                SELECT id, ts_rank(tsv, plainto_tsquery('english', :query)) AS fts_score
+                SELECT id,
+                       ts_rank(tsv, plainto_tsquery('english', :query)) AS raw_fts_score,
+                       ts_rank(tsv, plainto_tsquery('english', :query)) /
+                           (1 + ts_rank(tsv, plainto_tsquery('english', :query))) AS fts_score
                 FROM ${properties.contentElementTable}
                 WHERE 'Chunk' = ANY(labels)
                     AND tsv @@ plainto_tsquery('english', :query)
@@ -579,14 +583,17 @@ class PgVectorStore @JvmOverloads constructor(
         }
 
         // Use plainto_tsquery for natural language queries (handles plain text better than to_tsquery)
+        // Normalize ts_rank score to 0-1 range using score/(1+score) transformation
         val results = jdbcClient.sql(
             """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   ts_rank(tsv, plainto_tsquery('english', :query)) as score
+                   ts_rank(tsv, plainto_tsquery('english', :query)) as raw_score,
+                   ts_rank(tsv, plainto_tsquery('english', :query)) /
+                       (1 + ts_rank(tsv, plainto_tsquery('english', :query))) as score
             FROM ${properties.contentElementTable}
             WHERE 'Chunk' = ANY(labels)
                 AND tsv @@ plainto_tsquery('english', :query)
-            ORDER BY score DESC
+            ORDER BY raw_score DESC
             LIMIT :topK
             """.trimIndent()
         )
@@ -616,14 +623,17 @@ class PgVectorStore @JvmOverloads constructor(
         val filterResult = filterConverter.combineFilters(metadataFilter, entityFilter)
         val filterClause = if (filterResult.isEmpty()) "" else " AND ${filterResult.whereClause}"
 
+        // Normalize ts_rank score to 0-1 range using score/(1+score) transformation
         val sql = """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   ts_rank(tsv, plainto_tsquery('english', :query)) as score
+                   ts_rank(tsv, plainto_tsquery('english', :query)) as raw_score,
+                   ts_rank(tsv, plainto_tsquery('english', :query)) /
+                       (1 + ts_rank(tsv, plainto_tsquery('english', :query))) as score
             FROM ${properties.contentElementTable}
             WHERE 'Chunk' = ANY(labels)
                 AND tsv @@ plainto_tsquery('english', :query)
                 $filterClause
-            ORDER BY score DESC
+            ORDER BY raw_score DESC
             LIMIT :topK
         """.trimIndent()
 
