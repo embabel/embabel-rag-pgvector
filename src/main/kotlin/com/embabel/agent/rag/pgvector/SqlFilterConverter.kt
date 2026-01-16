@@ -17,6 +17,9 @@ package com.embabel.agent.rag.pgvector
 
 import com.embabel.agent.rag.filter.EntityFilter
 import com.embabel.agent.rag.filter.PropertyFilter
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 
 /**
  * Result of converting a [PropertyFilter] to SQL WHERE clause components.
@@ -80,7 +83,10 @@ data class SqlFilterResult(
 class SqlFilterConverter(
     private val paramPrefix: String = "_filter_",
 ) {
-    private val objectMapper = com.fasterxml.jackson.databind.ObjectMapper()
+    private val objectMapper = ObjectMapper().apply {
+        registerModule(JavaTimeModule())
+        disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+    }
 
     /**
      * Converts a [PropertyFilter] to SQL WHERE clause components for metadata filtering.

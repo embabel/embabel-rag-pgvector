@@ -36,6 +36,8 @@ import com.embabel.common.ai.model.EmbeddingService
 import com.embabel.common.core.types.SimilarityResult
 import com.embabel.common.core.types.TextSimilaritySearchRequest
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import org.springframework.jdbc.core.simple.JdbcClient
 import java.sql.ResultSet
 
@@ -72,7 +74,10 @@ class PgVectorStore @JvmOverloads constructor(
 ), ChunkingContentElementRepository, CoreSearchOperations,
     FilteringTextSearch, FilteringVectorSearch {
 
-    private val objectMapper = ObjectMapper()
+    private val objectMapper = ObjectMapper().apply {
+        registerModule(JavaTimeModule())
+        disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+    }
     private val filterConverter = SqlFilterConverter()
 
     companion object {
