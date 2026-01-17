@@ -1,30 +1,43 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://maven.apache.org/POM/4.0.0"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
-        <groupId>com.embabel.agent</groupId>
-        <artifactId>embabel-agent-parent</artifactId>
-        <version>0.3.3-SNAPSHOT</version>
-        <relativePath>../embabel-agent/pom.xml</relativePath>
+        <groupId>com.embabel.build</groupId>
+        <artifactId>embabel-build-parent</artifactId>
+        <version>0.1.10-SNAPSHOT</version>
     </parent>
+    <groupId>com.embabel.agent</groupId>
     <artifactId>embabel-agent-rag-pgvector</artifactId>
+    <version>0.3.3-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>Embabel Agent RAG PgVector</name>
     <description>PgVector RAG implementation with hybrid search for Embabel Agent</description>
-    <url>https://github.com/embabel/embabel-agent</url>
+    <url>https://github.com/embabel/embabel-rag-pgvector</url>
 
     <scm>
-        <url>https://github.com/embabel/embabel-agent</url>
-        <connection>scm:git:https://github.com/embabel/embabel-agent.git</connection>
-        <developerConnection>scm:git:https://github.com/embabel/embabel-agent.git</developerConnection>
+        <url>https://github.com/embabel/embabel-rag-pgvector</url>
+        <connection>scm:git:https://github.com/embabel/embabel-rag-pgvector.git</connection>
+        <developerConnection>scm:git:https://github.com/embabel/embabel-rag-pgvector.git</developerConnection>
         <tag>HEAD</tag>
     </scm>
 
     <properties>
-        <!-- Match embabel-air's testcontainers version for Docker Desktop compatibility -->
+        <embabel-agent.version>0.3.3-SNAPSHOT</embabel-agent.version>
         <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-dependencies</artifactId>
+                <version>${embabel-agent.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
 
@@ -62,6 +75,12 @@
         </dependency>
 
         <!-- Testing -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-testcontainers</artifactId>
