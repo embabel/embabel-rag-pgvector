@@ -118,7 +118,13 @@ data class PgVectorStoreBuilder(
         copy(schemaName = schemaName)
 
     /**
-     * Sets the dimension of embedding vectors.
+     * Sets the dimension of embedding vectors explicitly.
+     *
+     * Note: When an [EmbeddingService] is provided via [withEmbeddingService],
+     * the dimension is automatically inferred from the service and this setting
+     * is ignored. Only use this method when not using an embedding service
+     * (text-only search mode).
+     *
      * Defaults to 1536 (OpenAI text-embedding-ada-002).
      */
     fun withEmbeddingDimension(embeddingDimension: Int): PgVectorStoreBuilder {
@@ -171,11 +177,14 @@ data class PgVectorStoreBuilder(
             ?: dataSource?.let { JdbcClient.create(it) }
             ?: throw IllegalStateException("Either jdbcClient or dataSource must be provided")
 
+        // Infer embedding dimension from service if available, otherwise use explicit value
+        val resolvedEmbeddingDimension = embeddingService?.dimensions ?: embeddingDimension
+
         val properties = PgVectorStoreProperties(
             name = name,
             contentElementTable = contentElementTable,
             schemaName = schemaName,
-            embeddingDimension = embeddingDimension,
+            embeddingDimension = resolvedEmbeddingDimension,
             vectorWeight = vectorWeight,
             ftsWeight = ftsWeight,
             fuzzyThreshold = fuzzyThreshold,
@@ -203,11 +212,14 @@ data class PgVectorStoreBuilder(
             ?: dataSource?.let { JdbcClient.create(it) }
             ?: throw IllegalStateException("Either jdbcClient or dataSource must be provided")
 
+        // Infer embedding dimension from service if available, otherwise use explicit value
+        val resolvedEmbeddingDimension = embeddingService?.dimensions ?: embeddingDimension
+
         val properties = PgVectorStoreProperties(
             name = name,
             contentElementTable = contentElementTable,
             schemaName = schemaName,
-            embeddingDimension = embeddingDimension,
+            embeddingDimension = resolvedEmbeddingDimension,
             vectorWeight = vectorWeight,
             ftsWeight = ftsWeight,
             fuzzyThreshold = fuzzyThreshold,
