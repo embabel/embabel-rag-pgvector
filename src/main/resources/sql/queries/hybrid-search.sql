@@ -3,12 +3,12 @@
 -- Combines scores with configurable weights (default: 70% vector, 30% FTS)
 WITH fts AS (
     SELECT id,
-           ts_rank(tsv, plainto_tsquery('english', :query)) AS raw_fts_score,
-           ts_rank(tsv, plainto_tsquery('english', :query)) /
-               (1 + ts_rank(tsv, plainto_tsquery('english', :query))) AS fts_score
+           ts_rank(tsv, websearch_to_tsquery('english', :query)) AS raw_fts_score,
+           ts_rank(tsv, websearch_to_tsquery('english', :query)) /
+               (1 + ts_rank(tsv, websearch_to_tsquery('english', :query))) AS fts_score
     FROM {table}
     WHERE 'Chunk' = ANY(labels)
-        AND tsv @@ plainto_tsquery('english', :query)
+        AND tsv @@ websearch_to_tsquery('english', :query)
 )
 SELECT dc.id,
        dc.uri,

@@ -108,12 +108,12 @@ class PgVectorStore @JvmOverloads constructor(
     override val name: String get() = properties.name
 
     override val luceneSyntaxNotes: String = """
-        PostgreSQL full-text search syntax:
-        - Use & for AND: 'machine & learning'
-        - Use | for OR: 'kotlin | java'
-        - Use ! for NOT: 'test & !unit'
-        - Use :* for prefix matching: 'mach:*'
-        - Phrases use proximity: 'machine <-> learning'
+        PostgreSQL websearch syntax (similar to web search engines):
+        - Multiple terms are ANDed by default: 'gold concierge' finds chunks with both
+        - Use OR for alternatives: 'gold OR silver' finds chunks with either
+        - Use - to exclude: 'gold -silver' finds gold but not silver
+        - Use quotes for exact phrases: '"gold concierge"' finds that exact phrase
+        - Keep queries simple - use key terms, not full sentences
     """.trimIndent()
 
     override fun provision() {
