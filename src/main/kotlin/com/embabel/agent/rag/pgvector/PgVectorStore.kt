@@ -79,6 +79,7 @@ class PgVectorStore @JvmOverloads constructor(
         disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
     }
     private val filterConverter = SqlFilterConverter()
+    private val sql = SqlResourceLoader.forProperties(properties)
 
     companion object {
         /**
@@ -132,24 +133,7 @@ class PgVectorStore @JvmOverloads constructor(
 
     private fun createContentElementTable() {
         // Create table if not exists
-        jdbcClient.sql(
-            """
-            CREATE TABLE IF NOT EXISTS ${properties.contentElementTable} (
-                id VARCHAR(255) PRIMARY KEY,
-                uri TEXT,
-                text TEXT,
-                urtext TEXT,
-                clean_text TEXT,
-                tokens TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-                tsv TSVECTOR,
-                embedding vector(${properties.embeddingDimension}),
-                parent_id VARCHAR(255),
-                labels TEXT[],
-                metadata JSONB,
-                ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-table")).update()
 
         // Add missing columns if table already existed (for schema migration)
         addColumnIfNotExists("embedding", "vector(${properties.embeddingDimension})")
@@ -162,63 +146,25 @@ class PgVectorStore @JvmOverloads constructor(
 
     private fun addColumnIfNotExists(columnName: String, columnType: String) {
         jdbcClient.sql(
-            """
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = '${properties.contentElementTable}'
-                    AND column_name = '$columnName'
-                ) THEN
-                    ALTER TABLE ${properties.contentElementTable} ADD COLUMN $columnName $columnType;
-                END IF;
-            END $$
-            """.trimIndent()
+            sql.load(
+                "ddl/add-column-if-not-exists",
+                mapOf("columnName" to columnName, "columnType" to columnType)
+            )
         ).update()
     }
 
     private fun createTsvTrigger() {
         // Create the trigger function for automatic tsvector maintenance
-        jdbcClient.sql(
-            """
-            CREATE OR REPLACE FUNCTION ${properties.contentElementTable}_tsv_trigger()
-            RETURNS TRIGGER AS ${'$'}${'$'}
-            BEGIN
-                NEW.tsv := to_tsvector('english', COALESCE(NEW.text, ''));
-                NEW.clean_text := regexp_replace(LOWER(COALESCE(NEW.text, '')), '[^a-z0-9\s]', '', 'g');
-                NEW.tokens := regexp_split_to_array(NEW.clean_text, '\s+');
-                RETURN NEW;
-            END;
-            ${'$'}${'$'} LANGUAGE plpgsql
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-tsv-trigger-function")).update()
 
-        // Create the trigger
-        jdbcClient.sql(
-            """
-            DROP TRIGGER IF EXISTS ${properties.contentElementTable}_tsv_update ON ${properties.contentElementTable}
-            """.trimIndent()
-        ).update()
-
-        jdbcClient.sql(
-            """
-            CREATE TRIGGER ${properties.contentElementTable}_tsv_update
-            BEFORE INSERT OR UPDATE ON ${properties.contentElementTable}
-            FOR EACH ROW
-            EXECUTE FUNCTION ${properties.contentElementTable}_tsv_trigger()
-            """.trimIndent()
-        ).update()
+        // Drop existing trigger and create new one
+        jdbcClient.sql(sql.load("ddl/drop-tsv-trigger")).update()
+        jdbcClient.sql(sql.load("ddl/create-tsv-trigger")).update()
 
         logger.info("Created tsvector trigger for automatic maintenance on {}", properties.contentElementTable)
 
         // Backfill tsv for any existing rows that have NULL tsv
-        val updated = jdbcClient.sql(
-            """
-            UPDATE ${properties.contentElementTable}
-            SET text = text
-            WHERE tsv IS NULL AND text IS NOT NULL
-            """.trimIndent()
-        ).update()
+        val updated = jdbcClient.sql(sql.load("ddl/backfill-tsv")).update()
         if (updated > 0) {
             logger.info("Backfilled tsv for {} existing rows", updated)
         }
@@ -226,49 +172,19 @@ class PgVectorStore @JvmOverloads constructor(
 
     private fun createIndexes() {
         // HNSW index for vector similarity search (cosine distance)
-        jdbcClient.sql(
-            """
-            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_embedding
-            ON ${properties.contentElementTable}
-            USING hnsw (embedding vector_cosine_ops)
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-index-embedding")).update()
 
         // GIN index for full-text search
-        jdbcClient.sql(
-            """
-            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_tsv
-            ON ${properties.contentElementTable}
-            USING GIN (tsv)
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-index-tsv")).update()
 
         // GIN index for trigram fuzzy search
-        jdbcClient.sql(
-            """
-            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_text_trgm
-            ON ${properties.contentElementTable}
-            USING GIN (text gin_trgm_ops)
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-index-text-trgm")).update()
 
         // GIN index for metadata JSONB
-        jdbcClient.sql(
-            """
-            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_metadata
-            ON ${properties.contentElementTable}
-            USING GIN (metadata)
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-index-metadata")).update()
 
         // Index on labels array
-        jdbcClient.sql(
-            """
-            CREATE INDEX IF NOT EXISTS idx_${properties.contentElementTable}_labels
-            ON ${properties.contentElementTable}
-            USING GIN (labels)
-            """.trimIndent()
-        ).update()
+        jdbcClient.sql(sql.load("ddl/create-index-labels")).update()
 
         logger.info("Created indexes on {}", properties.contentElementTable)
     }
@@ -286,12 +202,7 @@ class PgVectorStore @JvmOverloads constructor(
         logger.info("Deleting document with URI: {}", uri)
 
         // First find the root document
-        val rootId = jdbcClient.sql(
-            """
-            SELECT id FROM ${properties.contentElementTable}
-            WHERE uri = :uri AND 'Document' = ANY(labels)
-            """.trimIndent()
-        )
+        val rootId = jdbcClient.sql(sql.load("operations/find-root-by-uri"))
             .param("uri", uri)
             .query(String::class.java)
             .optional()
@@ -303,18 +214,7 @@ class PgVectorStore @JvmOverloads constructor(
         }
 
         // Delete all descendants using recursive CTE (includes embeddings)
-        val deletedCount = jdbcClient.sql(
-            """
-            WITH RECURSIVE descendants AS (
-                SELECT id FROM ${properties.contentElementTable} WHERE id = :rootId
-                UNION ALL
-                SELECT ce.id FROM ${properties.contentElementTable} ce
-                INNER JOIN descendants d ON ce.parent_id = d.id
-            )
-            DELETE FROM ${properties.contentElementTable}
-            WHERE id IN (SELECT id FROM descendants)
-            """.trimIndent()
-        )
+        val deletedCount = jdbcClient.sql(sql.load("operations/delete-root-and-descendants"))
             .param("rootId", rootId)
             .update()
 
@@ -326,12 +226,7 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     override fun existsRootWithUri(uri: String): Boolean {
-        val count = jdbcClient.sql(
-            """
-            SELECT COUNT(*) FROM ${properties.contentElementTable}
-            WHERE uri = :uri AND ('Document' = ANY(labels) OR 'ContentRoot' = ANY(labels))
-            """.trimIndent()
-        )
+        val count = jdbcClient.sql(sql.load("operations/exists-root-with-uri"))
             .param("uri", uri)
             .query(Int::class.java)
             .single()
@@ -340,13 +235,7 @@ class PgVectorStore @JvmOverloads constructor(
 
     override fun findContentRootByUri(uri: String): ContentRoot? {
         logger.debug("Finding root document with URI: {}", uri)
-        return jdbcClient.sql(
-            """
-            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
-            FROM ${properties.contentElementTable}
-            WHERE uri = :uri AND ('Document' = ANY(labels) OR 'ContentRoot' = ANY(labels))
-            """.trimIndent()
-        )
+        return jdbcClient.sql(sql.load("operations/find-content-root-by-uri"))
             .param("uri", uri)
             .query { rs, _ -> mapToContentElement(rs) }
             .optional()
@@ -366,22 +255,13 @@ class PgVectorStore @JvmOverloads constructor(
 
     private fun saveChunkWithEmbedding(chunk: Chunk, embedding: FloatArray?) {
         val embeddingString = embedding?.joinToString(",", "[", "]")
+        val sqlFile = if (embeddingString != null) {
+            "operations/upsert-chunk-with-embedding"
+        } else {
+            "operations/upsert-chunk-without-embedding"
+        }
 
-        jdbcClient.sql(
-            """
-            INSERT INTO ${properties.contentElementTable} (id, uri, text, urtext, parent_id, labels, metadata, embedding)
-            VALUES (:id, :uri, :text, :urtext, :parentId, :labels::text[], :metadata::jsonb,
-                    ${if (embeddingString != null) "CAST(:embedding AS vector)" else "NULL"})
-            ON CONFLICT (id) DO UPDATE SET
-                uri = EXCLUDED.uri,
-                text = EXCLUDED.text,
-                urtext = EXCLUDED.urtext,
-                parent_id = EXCLUDED.parent_id,
-                labels = EXCLUDED.labels,
-                metadata = EXCLUDED.metadata,
-                embedding = EXCLUDED.embedding
-            """.trimIndent()
-        )
+        jdbcClient.sql(sql.load(sqlFile))
             .param("id", chunk.id)
             .param("uri", chunk.uri)
             .param("text", chunk.text)
@@ -426,34 +306,7 @@ class PgVectorStore @JvmOverloads constructor(
 
         // Phase 1: Hybrid vector + full-text search
         // Normalize fts_score to 0-1 range using score/(1+score) transformation
-        val results = jdbcClient.sql(
-            """
-            WITH fts AS (
-                SELECT id,
-                       ts_rank(tsv, plainto_tsquery('english', :query)) AS raw_fts_score,
-                       ts_rank(tsv, plainto_tsquery('english', :query)) /
-                           (1 + ts_rank(tsv, plainto_tsquery('english', :query))) AS fts_score
-                FROM ${properties.contentElementTable}
-                WHERE 'Chunk' = ANY(labels)
-                    AND tsv @@ plainto_tsquery('english', :query)
-            )
-            SELECT dc.id,
-                   dc.uri,
-                   dc.text,
-                   dc.urtext,
-                   dc.parent_id,
-                   dc.labels,
-                   dc.metadata,
-                   dc.ingestion_timestamp,
-                   (1 - (dc.embedding <=> CAST(:embedding AS vector))) AS vec_score,
-                   f.fts_score,
-                   :vectorWeight * (1 - (dc.embedding <=> CAST(:embedding AS vector))) + :ftsWeight * f.fts_score AS score
-            FROM fts f
-            JOIN ${properties.contentElementTable} dc ON f.id = dc.id
-            ORDER BY score DESC
-            LIMIT :topK
-            """.trimIndent()
-        )
+        val results = jdbcClient.sql(sql.load("queries/hybrid-search"))
             .param("query", request.query)
             .param("embedding", embeddingString)
             .param("vectorWeight", properties.vectorWeight)
@@ -496,30 +349,7 @@ class PgVectorStore @JvmOverloads constructor(
             throw IllegalArgumentException("PgVectorStore fuzzySearch only supports Chunk class, got: $clazz")
         }
 
-        val results = jdbcClient.sql(
-            """
-            SELECT id,
-                   uri,
-                   text,
-                   urtext,
-                   parent_id,
-                   labels,
-                   metadata,
-                   ingestion_timestamp,
-                   (
-                       SELECT MAX(similarity(w, :query))
-                       FROM unnest(tokens) AS w
-                   ) AS score
-            FROM ${properties.contentElementTable}
-            WHERE 'Chunk' = ANY(labels)
-                AND (
-                    SELECT MAX(similarity(w, :query))
-                    FROM unnest(tokens) AS w
-                ) > :threshold
-            ORDER BY score DESC
-            LIMIT :topK
-            """.trimIndent()
-        )
+        val results = jdbcClient.sql(sql.load("queries/fuzzy-search"))
             .param("query", request.query.lowercase())
             .param("threshold", properties.fuzzyThreshold)
             .param("topK", request.topK)
@@ -550,17 +380,7 @@ class PgVectorStore @JvmOverloads constructor(
 
         val embeddingString = queryEmbedding.joinToString(",", "[", "]")
 
-        val results = jdbcClient.sql(
-            """
-            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   (1 - (embedding <=> CAST(:embedding AS vector))) AS score
-            FROM ${properties.contentElementTable}
-            WHERE 'Chunk' = ANY(labels)
-                AND embedding IS NOT NULL
-            ORDER BY embedding <=> CAST(:embedding AS vector)
-            LIMIT :topK
-            """.trimIndent()
-        )
+        val results = jdbcClient.sql(sql.load("queries/vector-search"))
             .param("embedding", embeddingString)
             .param("topK", request.topK)
             .query { rs, _ ->
@@ -583,20 +403,9 @@ class PgVectorStore @JvmOverloads constructor(
         }
 
         // Use plainto_tsquery for natural language queries (handles plain text better than to_tsquery)
-        // Normalize ts_rank score to 0-1 range using score/(1+score) transformation
-        val results = jdbcClient.sql(
-            """
-            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
-                   ts_rank(tsv, plainto_tsquery('english', :query)) as raw_score,
-                   ts_rank(tsv, plainto_tsquery('english', :query)) /
-                       (1 + ts_rank(tsv, plainto_tsquery('english', :query))) as score
-            FROM ${properties.contentElementTable}
-            WHERE 'Chunk' = ANY(labels)
-                AND tsv @@ plainto_tsquery('english', :query)
-            ORDER BY raw_score DESC
-            LIMIT :topK
-            """.trimIndent()
-        )
+        // Normalize ts_rank score to 0-1 range using 2*score/(1+score) transformation
+        // This scales typical ts_rank values (0.01-0.6) to a range comparable with vector similarity (0-1)
+        val results = jdbcClient.sql(sql.load("queries/text-search"))
             .param("query", request.query)
             .param("topK", request.topK)
             .query { rs, _ ->
@@ -623,12 +432,11 @@ class PgVectorStore @JvmOverloads constructor(
         val filterResult = filterConverter.combineFilters(metadataFilter, entityFilter)
         val filterClause = if (filterResult.isEmpty()) "" else " AND ${filterResult.whereClause}"
 
-        // Normalize ts_rank score to 0-1 range using score/(1+score) transformation
+        // Normalize ts_rank score to 0-1 range using score * 3 (capped at 1.0)
         val sql = """
             SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp,
                    ts_rank(tsv, plainto_tsquery('english', :query)) as raw_score,
-                   ts_rank(tsv, plainto_tsquery('english', :query)) /
-                       (1 + ts_rank(tsv, plainto_tsquery('english', :query))) as score
+                   LEAST(1.0, ts_rank(tsv, plainto_tsquery('english', :query)) * 3) as score
             FROM ${properties.contentElementTable}
             WHERE 'Chunk' = ANY(labels)
                 AND tsv @@ plainto_tsquery('english', :query)
@@ -709,14 +517,7 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     override fun info(): ContentElementRepositoryInfo {
-        val stats = jdbcClient.sql(
-            """
-            SELECT
-                (SELECT COUNT(*) FROM ${properties.contentElementTable} WHERE 'Chunk' = ANY(labels)) as chunk_count,
-                (SELECT COUNT(*) FROM ${properties.contentElementTable} WHERE 'Document' = ANY(labels)) as document_count,
-                (SELECT COUNT(*) FROM ${properties.contentElementTable}) as content_element_count
-            """.trimIndent()
-        )
+        val stats = jdbcClient.sql(sql.load("queries/store-info"))
             .query { rs, _ ->
                 mapOf(
                     "chunk_count" to rs.getInt("chunk_count"),
@@ -737,26 +538,14 @@ class PgVectorStore @JvmOverloads constructor(
 
     override fun findAllChunksById(chunkIds: List<String>): Iterable<Chunk> {
         if (chunkIds.isEmpty()) return emptyList()
-        return jdbcClient.sql(
-            """
-            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
-            FROM ${properties.contentElementTable}
-            WHERE id = ANY(:ids) AND 'Chunk' = ANY(labels)
-            """.trimIndent()
-        )
+        return jdbcClient.sql(sql.load("queries/find-chunks-by-ids"))
             .param("ids", chunkIds.toTypedArray())
             .query { rs, _ -> mapToChunk(rs) }
             .list()
     }
 
     override fun findById(id: String): ContentElement? {
-        return jdbcClient.sql(
-            """
-            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
-            FROM ${properties.contentElementTable}
-            WHERE id = :id
-            """.trimIndent()
-        )
+        return jdbcClient.sql(sql.load("queries/find-by-id"))
             .param("id", id)
             .query { rs, _ -> mapToContentElement(rs) }
             .optional()
@@ -764,13 +553,7 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     private fun findChunkById(id: String): Chunk? {
-        return jdbcClient.sql(
-            """
-            SELECT id, uri, text, urtext, parent_id, labels, metadata, ingestion_timestamp
-            FROM ${properties.contentElementTable}
-            WHERE id = :id AND 'Chunk' = ANY(labels)
-            """.trimIndent()
-        )
+        return jdbcClient.sql(sql.load("queries/find-chunk-by-id"))
             .param("id", id)
             .query { rs, _ -> mapToChunk(rs) }
             .optional()
@@ -778,19 +561,7 @@ class PgVectorStore @JvmOverloads constructor(
     }
 
     override fun save(element: ContentElement): ContentElement {
-        jdbcClient.sql(
-            """
-            INSERT INTO ${properties.contentElementTable} (id, uri, text, urtext, parent_id, labels, metadata)
-            VALUES (:id, :uri, :text, :urtext, :parentId, :labels::text[], :metadata::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-                uri = EXCLUDED.uri,
-                text = EXCLUDED.text,
-                urtext = EXCLUDED.urtext,
-                parent_id = EXCLUDED.parent_id,
-                labels = EXCLUDED.labels,
-                metadata = EXCLUDED.metadata
-            """.trimIndent()
-        )
+        jdbcClient.sql(sql.load("operations/save-element"))
             .param("id", element.id)
             .param("uri", element.uri)
             .param("text", (element as? Chunk)?.text)
