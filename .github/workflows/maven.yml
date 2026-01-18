@@ -20,6 +20,10 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
           cache: maven
+      - name: Configure Testcontainers
+        run: |
+          mkdir -p /home/runner
+          echo "testcontainers.reuse.enable=true" > /home/runner/.testcontainers.properties
       - name: Build and analyze
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
