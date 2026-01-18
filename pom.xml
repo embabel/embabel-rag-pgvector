@@ -7,7 +7,7 @@
         <artifactId>embabel-build-parent</artifactId>
         <version>0.1.10-SNAPSHOT</version>
     </parent>
-    <groupId>com.embabel.agent.rag</groupId>
+    <groupId>com.embabel.rag</groupId>
     <artifactId>embabel-agent-rag-pgvector</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
