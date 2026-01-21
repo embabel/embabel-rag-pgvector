@@ -239,9 +239,9 @@ class PgVectorStore @JvmOverloads constructor(
         logger.debug("Finding root document with URI: {}", uri)
         return jdbcClient.sql(sql.load("operations/find-content-root-by-uri"))
             .param("uri", uri)
-            .query { rs, _ -> mapToContentElement(rs) }
+            .query { rs, _ -> mapToContentRoot(rs) }
             .optional()
-            .orElse(null) as? ContentRoot
+            .orElse(null)
     }
 
     override fun persistChunksWithEmbeddings(
@@ -548,7 +548,11 @@ class PgVectorStore @JvmOverloads constructor(
         return jdbcClient.sql(sql.load("queries/find-all-by-label"))
             .param("label", label)
             .query { rs, _ ->
-                if (label == "Chunk") mapToChunk(rs) else mapToContentElement(rs)
+                when (label) {
+                    "Chunk" -> mapToChunk(rs)
+                    "Document" -> mapToContentRoot(rs)
+                    else -> mapToContentElement(rs)
+                }
             }
             .list() as Iterable<C>
     }
@@ -659,6 +663,24 @@ class PgVectorStore @JvmOverloads constructor(
         }
     }
 
+    private fun mapToContentRoot(rs: ResultSet): ContentRoot {
+        val metadata = parseJsonb(rs.getString("metadata"))
+        val title = metadata["title"]?.toString() ?: ""
+        val ingestionTimestamp = when (val ts = metadata["ingestionTimestamp"]) {
+            is java.time.Instant -> ts
+            is String -> java.time.Instant.parse(ts)
+            is Number -> java.time.Instant.ofEpochMilli(ts.toLong())
+            else -> java.time.Instant.now()
+        }
+        return StoredContentRoot(
+            id = rs.getString("id"),
+            uri = rs.getString("uri") ?: "",
+            title = title,
+            ingestionTimestamp = ingestionTimestamp,
+            metadata = metadata
+        )
+    }
+
     private fun mapToChunk(rs: ResultSet): Chunk {
         return Chunk.create(
             id = rs.getString("id"),
@@ -702,6 +724,17 @@ data class GenericContentElement(
 ) : ContentElement {
     override fun labels(): Set<String> = labels + setOf("ContentElement")
 }
+
+/**
+ * ContentRoot implementation for documents retrieved from the database.
+ */
+data class StoredContentRoot(
+    override val id: String,
+    override val uri: String,
+    override val title: String,
+    override val ingestionTimestamp: java.time.Instant,
+    override val metadata: Map<String, Any?>
+) : ContentRoot
 
 /**
  * Holds raw document content retrieved from the database.
