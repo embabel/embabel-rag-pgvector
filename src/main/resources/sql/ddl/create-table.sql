@@ -11,5 +11,8 @@ CREATE TABLE IF NOT EXISTS {table} (
     parent_id VARCHAR(255),
     labels TEXT[],
     metadata JSONB,
-    ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Raw content storage for documents (original bytes before chunking)
+    raw_content BYTEA,
+    content_type VARCHAR(255)
 )

@@ -140,6 +140,8 @@ class PgVectorStore @JvmOverloads constructor(
         addColumnIfNotExists("clean_text", "TEXT")
         addColumnIfNotExists("tokens", "TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]")
         addColumnIfNotExists("tsv", "TSVECTOR")
+        addColumnIfNotExists("raw_content", "BYTEA")
+        addColumnIfNotExists("content_type", "VARCHAR(255)")
 
         logger.info("Created/updated content element table: {}", properties.contentElementTable)
     }
@@ -536,6 +538,21 @@ class PgVectorStore @JvmOverloads constructor(
         )
     }
 
+    @Suppress("UNCHECKED_CAST")
+    override fun <C : ContentElement> findAll(clazz: Class<C>): Iterable<C> {
+        val label = when {
+            Chunk::class.java.isAssignableFrom(clazz) -> "Chunk"
+            ContentRoot::class.java.isAssignableFrom(clazz) -> "Document"
+            else -> "ContentElement"
+        }
+        return jdbcClient.sql(sql.load("queries/find-all-by-label"))
+            .param("label", label)
+            .query { rs, _ ->
+                if (label == "Chunk") mapToChunk(rs) else mapToContentElement(rs)
+            }
+            .list() as Iterable<C>
+    }
+
     override fun findAllChunksById(chunkIds: List<String>): Iterable<Chunk> {
         if (chunkIds.isEmpty()) return emptyList()
         return jdbcClient.sql(sql.load("queries/find-chunks-by-ids"))
@@ -571,6 +588,55 @@ class PgVectorStore @JvmOverloads constructor(
             .param("metadata", toJsonb(element.propertiesToPersist()))
             .update()
         return element
+    }
+
+    /**
+     * Save a document with its raw content (original bytes before chunking).
+     *
+     * @param element The document to save
+     * @param rawContent The original content bytes (PDF, HTML, etc.)
+     * @param contentType MIME type of the content (e.g., "application/pdf", "text/html")
+     * @return The saved document
+     */
+    fun saveDocumentWithContent(
+        element: ContentElement,
+        rawContent: ByteArray,
+        contentType: String
+    ): ContentElement {
+        jdbcClient.sql(sql.load("operations/save-document-with-content"))
+            .param("id", element.id)
+            .param("uri", element.uri)
+            .param("text", (element as? Chunk)?.text)
+            .param("parentId", (element as? com.embabel.agent.rag.model.HierarchicalContentElement)?.parentId)
+            .param("labels", element.labels().toTypedArray())
+            .param("metadata", toJsonb(element.propertiesToPersist()))
+            .param("rawContent", rawContent)
+            .param("contentType", contentType)
+            .update()
+        return element
+    }
+
+    /**
+     * Retrieve the raw content for a document by ID.
+     *
+     * @param documentId The ID of the document
+     * @return The raw content info, or null if not found
+     */
+    fun getRawContent(documentId: String): RawDocumentContent? {
+        return jdbcClient.sql(sql.load("queries/get-raw-content"))
+            .param("id", documentId)
+            .query { rs, _ ->
+                RawDocumentContent(
+                    id = rs.getString("id"),
+                    uri = rs.getString("uri"),
+                    rawContent = rs.getBytes("raw_content"),
+                    contentType = rs.getString("content_type"),
+                    labels = (rs.getArray("labels")?.array as? Array<*>)?.map { it.toString() }?.toSet() ?: emptySet(),
+                    metadata = parseJsonb(rs.getString("metadata"))
+                )
+            }
+            .optional()
+            .orElse(null)
     }
 
     override fun findChunksForEntity(entityId: String): List<Chunk> {
@@ -635,4 +701,35 @@ data class GenericContentElement(
     override val metadata: Map<String, Any?>
 ) : ContentElement {
     override fun labels(): Set<String> = labels + setOf("ContentElement")
+}
+
+/**
+ * Holds raw document content retrieved from the database.
+ *
+ * This contains the original bytes of a document before any chunking or processing,
+ * along with metadata about the content type.
+ *
+ * @property id The document ID
+ * @property uri The document URI
+ * @property rawContent The original bytes of the document (may be null if not stored)
+ * @property contentType MIME type of the content (e.g., "application/pdf", "text/html")
+ * @property labels The labels associated with this document
+ * @property metadata Additional metadata
+ */
+data class RawDocumentContent(
+    val id: String,
+    val uri: String?,
+    val rawContent: ByteArray?,
+    val contentType: String?,
+    val labels: Set<String>,
+    val metadata: Map<String, Any?>
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as RawDocumentContent
+        return id == other.id
+    }
+
+    override fun hashCode(): Int = id.hashCode()
 }
