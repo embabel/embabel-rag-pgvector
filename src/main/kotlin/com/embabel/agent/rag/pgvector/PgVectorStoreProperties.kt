@@ -27,6 +27,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties
  * @property vectorWeight Weight for vector similarity score in hybrid search (0.0-1.0)
  * @property ftsWeight Weight for full-text search score in hybrid search (0.0-1.0)
  * @property fuzzyThreshold Minimum trigram similarity threshold for fuzzy fallback (0.0-1.0)
+ * @property similarityThresholdCeiling Maximum threshold to apply when filtering search results (0.0-1.0).
+ *           Prevents overly aggressive filtering when LLM requests high thresholds.
+ *           Results with scores below this are still returned if they're in topK.
  */
 @ConfigurationProperties(prefix = "embabel.rag.pgvector")
 data class PgVectorStoreProperties(
@@ -36,5 +39,6 @@ data class PgVectorStoreProperties(
     val embeddingDimension: Int = 1536,
     val vectorWeight: Double = 0.7,
     val ftsWeight: Double = 0.3,
-    val fuzzyThreshold: Double = 0.2
+    val fuzzyThreshold: Double = 0.2,
+    val similarityThresholdCeiling: Double = 0.5
 )

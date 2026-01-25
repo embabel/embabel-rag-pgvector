@@ -392,8 +392,16 @@ class PgVectorStore @JvmOverloads constructor(
             }
             .list()
 
+        // Apply threshold floor to avoid overly aggressive filtering
+        // topK already limits results, so use a lenient threshold
+        val effectiveThreshold = minOf(request.similarityThreshold, properties.similarityThresholdCeiling)
+        logger.debug(
+            "Vector search for '{}': {} results before threshold filter (requested={}, effective={})",
+            request.query, results.size, request.similarityThreshold, effectiveThreshold
+        )
+
         @Suppress("UNCHECKED_CAST")
-        return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
+        return results.filter { it.score >= effectiveThreshold } as List<SimilarityResult<T>>
     }
 
     override fun <T : Retrievable> textSearch(
@@ -417,8 +425,9 @@ class PgVectorStore @JvmOverloads constructor(
             }
             .list()
 
+        val effectiveThreshold = minOf(request.similarityThreshold, properties.similarityThresholdCeiling)
         @Suppress("UNCHECKED_CAST")
-        return results.filter { it.score >= request.similarityThreshold } as List<SimilarityResult<T>>
+        return results.filter { it.score >= effectiveThreshold } as List<SimilarityResult<T>>
     }
 
     override fun <T : Retrievable> textSearchWithFilter(

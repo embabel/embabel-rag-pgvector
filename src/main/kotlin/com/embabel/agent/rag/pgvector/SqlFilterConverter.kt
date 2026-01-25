@@ -215,6 +215,36 @@ class SqlFilterConverter(
             "metadata->>'${filter.key}' LIKE :$paramName"
         }
 
+        is PropertyFilter.ContainsIgnoreCase -> {
+            val paramName = "$paramPrefix${counter.next()}"
+            params[paramName] = "%${filter.value.lowercase()}%"
+            "LOWER(metadata->>'${filter.key}') LIKE :$paramName"
+        }
+
+        is PropertyFilter.EqIgnoreCase -> {
+            val paramName = "$paramPrefix${counter.next()}"
+            params[paramName] = filter.value.lowercase()
+            "LOWER(metadata->>'${filter.key}') = :$paramName"
+        }
+
+        is PropertyFilter.StartsWith -> {
+            val paramName = "$paramPrefix${counter.next()}"
+            params[paramName] = "${filter.value}%"
+            "metadata->>'${filter.key}' LIKE :$paramName"
+        }
+
+        is PropertyFilter.EndsWith -> {
+            val paramName = "$paramPrefix${counter.next()}"
+            params[paramName] = "%${filter.value}"
+            "metadata->>'${filter.key}' LIKE :$paramName"
+        }
+
+        is PropertyFilter.Like -> {
+            val paramName = "$paramPrefix${counter.next()}"
+            params[paramName] = filter.pattern
+            "metadata->>'${filter.key}' ~ :$paramName"
+        }
+
         is PropertyFilter.And -> {
             val clauses = filter.filters.map { convertFilter(it, params, counter) }
             if (clauses.size == 1) {

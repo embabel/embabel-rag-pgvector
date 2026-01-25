@@ -120,6 +120,75 @@ class SqlFilterConverterTest {
     }
 
     @Test
+    fun `ContainsIgnoreCase filter generates LOWER LIKE comparison`() {
+        val filter = PropertyFilter.containsIgnoreCase("title", "Kubernetes")
+        val result = converter.convert(filter)
+
+        assertEquals("LOWER(metadata->>'title') LIKE :_filter_0", result.whereClause)
+        assertEquals("%kubernetes%", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `ContainsIgnoreCase lowercases the parameter value`() {
+        val filter = PropertyFilter.containsIgnoreCase("name", "UPPER CASE")
+        val result = converter.convert(filter)
+
+        assertEquals("%upper case%", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `EqIgnoreCase filter generates LOWER equality comparison`() {
+        val filter = PropertyFilter.eqIgnoreCase("status", "Active")
+        val result = converter.convert(filter)
+
+        assertEquals("LOWER(metadata->>'status') = :_filter_0", result.whereClause)
+        assertEquals("active", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `EqIgnoreCase lowercases the parameter value`() {
+        val filter = PropertyFilter.eqIgnoreCase("status", "PENDING")
+        val result = converter.convert(filter)
+
+        assertEquals("pending", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `StartsWith filter generates LIKE with suffix wildcard`() {
+        val filter = PropertyFilter.startsWith("path", "/api/")
+        val result = converter.convert(filter)
+
+        assertEquals("metadata->>'path' LIKE :_filter_0", result.whereClause)
+        assertEquals("/api/%", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `EndsWith filter generates LIKE with prefix wildcard`() {
+        val filter = PropertyFilter.endsWith("filename", ".pdf")
+        val result = converter.convert(filter)
+
+        assertEquals("metadata->>'filename' LIKE :_filter_0", result.whereClause)
+        assertEquals("%.pdf", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `Like filter generates regex match`() {
+        val filter = PropertyFilter.like("code", "ERR-\\d{3}")
+        val result = converter.convert(filter)
+
+        assertEquals("metadata->>'code' ~ :_filter_0", result.whereClause)
+        assertEquals("ERR-\\d{3}", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `Like filter preserves regex pattern exactly`() {
+        val filter = PropertyFilter.like("email", "^[a-z]+@example\\.com$")
+        val result = converter.convert(filter)
+
+        assertEquals("^[a-z]+@example\\.com$", result.parameters["_filter_0"])
+    }
+
+    @Test
     fun `And filter combines clauses with AND`() {
         val filter = PropertyFilter.eq("owner", "alice") and PropertyFilter.gte("score", 0.8)
         val result = converter.convert(filter)
@@ -227,5 +296,63 @@ class SqlFilterConverterTest {
         assertTrue(result.whereClause.contains(" OR "))
         assertTrue(result.whereClause.contains(" AND "))
         assertEquals(4, result.parameters.size)
+    }
+
+    @Test
+    fun `ContainsIgnoreCase combined with And`() {
+        val filter = PropertyFilter.containsIgnoreCase("name", "alice") and PropertyFilter.eq("status", "active")
+        val result = converter.convert(filter)
+
+        assertTrue(result.whereClause.contains(" AND "))
+        assertTrue(result.whereClause.contains("LOWER(metadata->>'name') LIKE :_filter_0"))
+        assertTrue(result.whereClause.contains("metadata @> :_filter_1::jsonb"))
+        assertEquals("%alice%", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `StartsWith combined with EndsWith`() {
+        val filter = PropertyFilter.startsWith("path", "/api/") and PropertyFilter.endsWith("path", "/v1")
+        val result = converter.convert(filter)
+
+        assertTrue(result.whereClause.contains(" AND "))
+        assertEquals("/api/%", result.parameters["_filter_0"])
+        assertEquals("%/v1", result.parameters["_filter_1"])
+    }
+
+    @Test
+    fun `Like combined with EqIgnoreCase`() {
+        val filter = PropertyFilter.like("code", "ERR-\\d+") and PropertyFilter.eqIgnoreCase("severity", "HIGH")
+        val result = converter.convert(filter)
+
+        assertTrue(result.whereClause.contains(" AND "))
+        assertTrue(result.whereClause.contains("metadata->>'code' ~ :_filter_0"))
+        assertTrue(result.whereClause.contains("LOWER(metadata->>'severity') = :_filter_1"))
+        assertEquals("ERR-\\d+", result.parameters["_filter_0"])
+        assertEquals("high", result.parameters["_filter_1"])
+    }
+
+    @Test
+    fun `Not with ContainsIgnoreCase`() {
+        val filter = !PropertyFilter.containsIgnoreCase("name", "test")
+        val result = converter.convert(filter)
+
+        assertTrue(result.whereClause.startsWith("NOT ("))
+        assertTrue(result.whereClause.contains("LOWER(metadata->>'name') LIKE :_filter_0"))
+        assertEquals("%test%", result.parameters["_filter_0"])
+    }
+
+    @Test
+    fun `HasAnyLabel with string operators`() {
+        val metadataFilter = PropertyFilter.containsIgnoreCase("name", "smith") and PropertyFilter.startsWith("id", "USR-")
+        val entityFilter = EntityFilter.hasAnyLabel("Person")
+
+        val result = converter.combineFilters(metadataFilter, entityFilter)
+
+        assertTrue(result.whereClause.contains(" AND "))
+        assertTrue(result.whereClause.contains("LOWER(metadata->>'name') LIKE"))
+        assertTrue(result.whereClause.contains("metadata->>'id' LIKE"))
+        assertTrue(result.whereClause.contains("labels && :_filter_2::text[]"))
+        assertEquals("%smith%", result.parameters["_filter_0"])
+        assertEquals("USR-%", result.parameters["_filter_1"])
     }
 }
