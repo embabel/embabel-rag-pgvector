@@ -15,14 +15,14 @@
  */
 package com.embabel.agent.rag.pgvector
 
+import com.embabel.agent.filter.PropertyFilter
 import com.embabel.agent.rag.filter.EntityFilter
-import com.embabel.agent.rag.filter.PropertyFilter
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 
 /**
- * Result of converting a [PropertyFilter] to SQL WHERE clause components.
+ * Result of converting a [com.embabel.agent.rag.filter.PropertyFilter] to SQL WHERE clause components.
  *
  * @property whereClause The SQL WHERE clause fragment (without the "WHERE" keyword)
  * @property parameters Map of parameter names to values for parameterized queries
@@ -273,6 +273,10 @@ class SqlFilterConverter(
             // Use array overlap operator for label matching
             params[paramName] = filter.labels.toTypedArray()
             "labels && :$paramName::text[]"
+        }
+
+        else -> {
+            throw IllegalArgumentException("Unsupported filter type: ${filter::class}")
         }
     }
 
