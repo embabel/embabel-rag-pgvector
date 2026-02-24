@@ -18,11 +18,11 @@ package com.embabel.agent.rag.pgvector
 import com.embabel.agent.core.DataDictionary
 import com.embabel.agent.filter.PropertyFilter
 import com.embabel.agent.rag.filter.EntityFilter
-import com.embabel.agent.rag.model.NamedEntity
 import com.embabel.agent.rag.model.NamedEntityData
 import com.embabel.agent.rag.model.RelationshipDirection
 import com.embabel.agent.rag.model.SimpleNamedEntityData
 import com.embabel.agent.rag.service.NamedEntityDataRepository
+import com.embabel.agent.rag.service.NativeFinder
 import com.embabel.agent.rag.service.RelationshipData
 import com.embabel.agent.rag.service.RetrievableIdentifier
 import com.embabel.common.ai.model.EmbeddingService
@@ -33,15 +33,6 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import org.slf4j.LoggerFactory
 import org.springframework.jdbc.core.simple.JdbcClient
 import java.sql.ResultSet
-
-/**
- * Functional interface for native entity lookup, avoiding JPA dependency in this module.
- * Callers register these from their JPA repositories.
- */
-interface NativeEntityLookup<T> {
-    fun findById(id: String): T?
-    fun findAll(): List<T>
-}
 
 /**
  * JPA/pgvector-backed implementation of [NamedEntityDataRepository].
@@ -61,7 +52,7 @@ class JdbcNamedEntityDataRepository @JvmOverloads constructor(
     private val tableName: String = "named_entities",
     private val relationshipTableName: String = "entity_relationships",
     private val embeddingDimension: Int = embeddingService?.dimensions ?: 1536,
-    private val nativeLookups: Map<Class<*>, NativeEntityLookup<*>> = emptyMap(),
+    override val nativeFinder: NativeFinder = NativeFinder.NONE,
 ) : NamedEntityDataRepository {
 
     private val logger = LoggerFactory.getLogger(JdbcNamedEntityDataRepository::class.java)
@@ -272,23 +263,6 @@ class JdbcNamedEntityDataRepository @JvmOverloads constructor(
 
     override fun withContextScope(contextId: String): NamedEntityDataRepository {
         return ContextScopedRepository(this, contextId)
-    }
-
-    // === Native store hooks ===
-
-    override fun isNativeType(type: Class<*>): Boolean =
-        nativeLookups.containsKey(type)
-
-    @Suppress("UNCHECKED_CAST")
-    override fun <T : NamedEntity> findNativeById(id: String, type: Class<T>): T? {
-        val lookup = nativeLookups[type] as? NativeEntityLookup<T> ?: return null
-        return lookup.findById(id)
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    override fun <T : NamedEntity> findNativeAll(type: Class<T>): List<T>? {
-        val lookup = nativeLookups[type] as? NativeEntityLookup<T> ?: return null
-        return lookup.findAll()
     }
 
     // === Row mapping ===

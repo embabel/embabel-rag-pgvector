@@ -16,6 +16,7 @@
 package com.embabel.agent.rag.pgvector
 
 import com.embabel.agent.core.DataDictionary
+import com.embabel.agent.rag.service.NativeFinder
 import com.embabel.common.ai.model.EmbeddingService
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
@@ -29,11 +30,11 @@ import javax.sql.DataSource
  *
  * Example:
  * ```java
- * JpaNamedEntityDataRepository repo = JpaNamedEntityDataRepository.builder()
+ * JdbcNamedEntityDataRepository repo = JdbcNamedEntityDataRepository.builder()
  *     .withJdbcClient(jdbcClient)
  *     .withDataDictionary(dataDictionary)
  *     .withEmbeddingService(embeddingService)
- *     .withNativeLookup(Customer.class, customerLookup)
+ *     .withNativeFinder(nativeFinder)
  *     .build();
  * ```
  */
@@ -46,7 +47,7 @@ data class JdbcNamedEntityDataRepositoryBuilder(
     private val tableName: String = "named_entities",
     private val relationshipTableName: String = "entity_relationships",
     private val embeddingDimension: Int = 1536,
-    private val nativeLookups: Map<Class<*>, NativeEntityLookup<*>> = emptyMap(),
+    private val nativeFinder: NativeFinder = NativeFinder.NONE,
 ) {
 
     fun withJdbcClient(jdbcClient: JdbcClient): JdbcNamedEntityDataRepositoryBuilder =
@@ -73,8 +74,8 @@ data class JdbcNamedEntityDataRepositoryBuilder(
     fun withEmbeddingDimension(embeddingDimension: Int): JdbcNamedEntityDataRepositoryBuilder =
         copy(embeddingDimension = embeddingDimension)
 
-    fun <T> withNativeLookup(type: Class<T>, lookup: NativeEntityLookup<T>): JdbcNamedEntityDataRepositoryBuilder =
-        copy(nativeLookups = nativeLookups + (type to lookup))
+    fun withNativeFinder(nativeFinder: NativeFinder): JdbcNamedEntityDataRepositoryBuilder =
+        copy(nativeFinder = nativeFinder)
 
     fun build(): JdbcNamedEntityDataRepository {
         val resolvedJdbcClient = jdbcClient
@@ -94,7 +95,7 @@ data class JdbcNamedEntityDataRepositoryBuilder(
             tableName = tableName,
             relationshipTableName = relationshipTableName,
             embeddingDimension = resolvedDimension,
-            nativeLookups = nativeLookups,
+            nativeFinder = nativeFinder,
         )
 
         repository.provision()
@@ -119,7 +120,7 @@ data class JdbcNamedEntityDataRepositoryBuilder(
             tableName = tableName,
             relationshipTableName = relationshipTableName,
             embeddingDimension = resolvedDimension,
-            nativeLookups = nativeLookups,
+            nativeFinder = nativeFinder,
         )
     }
 }
